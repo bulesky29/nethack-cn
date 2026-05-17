@@ -12,6 +12,9 @@
 # Per-session DB snapshots
 /db/
 
+# Auto-generated reference manual (regenerated on first launch)
+/nh-helper-手册.pdf
+
 # Debug logs
 /nh-helper.raw.log
 /nh-helper.translate.log

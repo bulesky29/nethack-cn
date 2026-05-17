@@ -16,6 +16,15 @@ func main() {
 	debug := flag.Bool("debug", false, "Write verbose logs to nh-helper.raw.log and nh-helper.translate.log next to the binary")
 	flag.Parse()
 
+	// Generate the Chinese reference manual on first launch. Idempotent —
+	// the function checks for an existing file and skips when present, so
+	// host + client invocations both call it without racing meaningfully.
+	if path, wrote, err := ensureManual(); err != nil {
+		fmt.Fprintf(os.Stderr, "nh-helper: manual generation skipped (%v)\n", err)
+	} else if wrote {
+		fmt.Printf("nh-helper: generated reference manual → %s\n", path)
+	}
+
 	var err error
 	switch *mode {
 	case "host":

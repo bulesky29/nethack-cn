@@ -1,0 +1,24 @@
+# Build artifact
+/nh-helper
+
+# Local secrets — never commit
+/config.json
+
+# Runtime state: cache + glossary live database
+/nh-helper.db
+/nh-helper.db-wal
+/nh-helper.db-shm
+
+# Per-session DB snapshots
+/db/
+
+# Debug logs
+/nh-helper.raw.log
+/nh-helper.translate.log
+
+# macOS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo

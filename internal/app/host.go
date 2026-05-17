@@ -295,6 +295,11 @@ const (
 	eventPopupEnd    = "[POPUP_END]"
 	eventStatusBegin = "[STATUS_BEGIN]"
 	eventStatusEnd   = "[STATUS_END]"
+	// eventClearMenu tells the menu client to wipe the translation area
+	// below its status pane. Fires when the in-game popup goes away so
+	// the menu window feels live ("only shows what's open right now"
+	// rather than scrolling history forever).
+	eventClearMenu = "[CLEAR_MENU]"
 )
 
 // Pagination markers that indicate a full-screen popup is showing:
@@ -367,9 +372,18 @@ func watchScreen(ctx context.Context, vt vt10x.Terminal, r *router, dbg *debugLo
 				lastPopup = state.popup
 				lastMsg = "" // a popup invalidates the message-area cache
 				kind := classifyPopup(state.popup)
-				dbg.Raw("emit POPUP → %s (%d bytes, %d lines)",
-					kind, len(state.popup), strings.Count(state.popup, "\n")+1)
-				if err := emitPopup(r, kind, state.popup); err != nil {
+				// Strip dungeon-map bleed-through for menu popups before
+				// the LLM ever sees it. Narrative popups stay verbatim.
+				payload := state.popup
+				if kind == roleMenu {
+					if cleaned := extractMenuContent(state.popup); cleaned != "" {
+						payload = cleaned
+					}
+				}
+				dbg.Raw("emit POPUP → %s (%d → %d bytes, %d lines)",
+					kind, len(state.popup), len(payload),
+					strings.Count(payload, "\n")+1)
+				if err := emitPopup(r, kind, payload); err != nil {
 					dbg.Raw("emit POPUP failed: %v", err)
 					return
 				}
@@ -377,9 +391,15 @@ func watchScreen(ctx context.Context, vt vt10x.Terminal, r *router, dbg *debugLo
 			}
 			// Not in popup mode — reset popup dedupe so the *next*
 			// popup is sent even if its content matches the previous one.
+			// On transition out, tell the menu client to wipe its
+			// translation area so the window mirrors "what's open right
+			// now" instead of stacking history.
 			if inPopupMode {
-				dbg.Raw("popup LEAVE: last_marker_row=%d", markerRow)
+				dbg.Raw("popup LEAVE → menu CLEAR (last_marker_row=%d)", markerRow)
 				inPopupMode = false
+				if err := r.Send(roleMenu, eventClearMenu); err != nil {
+					dbg.Raw("emit CLEAR_MENU failed: %v", err)
+				}
 			}
 			lastPopup = ""
 

@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestClassifyMessage locks in the heuristic that routes farlook detail
 // cards to the menu window and everything else to the text window.
@@ -59,4 +62,87 @@ func TestClassifyMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExtractMenuContent locks in dungeon-bleed stripping for inventory
+// popups. The input is a verbatim capture of the user's `i` screen with
+// the dungeon view visible through the menu overlay.
+func TestExtractMenuContent(t *testing.T) {
+	raw := strings.Join([]string{
+		"Coins    ('$')",
+		"$ - 4 gold pieces",
+		"Weapons  (')')",
+		"b - a +2 sling (alternate weapon; not wielded)",
+		"-------             #   a - a +1 club (weapon in right hand)",
+		"|...%.|          ---|-- Armor    ('[')",
+		"#-.....|   ##(####..d..| e - a blessed +0 leather armor (being worn)",
+		"#|.....-####      |..!.| Food  ('%')",
+		"#|.>...|          |....| f - a food ration",
+		"#-------          |.$..| Potions  ('!')",
+		"####              -|---- h - a fizzy potion",
+		"#               ##    Gems/Stones  ('*')",
+		"#                #### g - a black gem",
+		"#                ---. c - 18 uncursed flint stones (in quiver pouch)",
+		"#                |... d - 27 uncursed rocks",
+	}, "\n")
+
+	out := extractMenuContent(raw)
+	lines := strings.Split(out, "\n")
+
+	mustHave := []string{
+		"Coins    ('$')",
+		"$ - 4 gold pieces",
+		"Weapons  (')')",
+		"b - a +2 sling (alternate weapon; not wielded)",
+		"a - a +1 club (weapon in right hand)",
+		"Armor    ('[')",
+		"e - a blessed +0 leather armor (being worn)",
+		"Food  ('%')",
+		"f - a food ration",
+		"Potions  ('!')",
+		"h - a fizzy potion",
+		"Gems/Stones  ('*')",
+		"g - a black gem",
+		"c - 18 uncursed flint stones (in quiver pouch)",
+		"d - 27 uncursed rocks",
+	}
+	for _, want := range mustHave {
+		if !containsLine(lines, want) {
+			t.Errorf("missing line %q in cleaned output:\n%s", want, out)
+		}
+	}
+
+	mustNotHave := []string{"---|--", "|...%.|", "####", "-------"}
+	for _, bad := range mustNotHave {
+		for _, line := range lines {
+			if strings.HasPrefix(line, bad) || line == bad {
+				t.Errorf("dungeon bleed %q survived: %q", bad, line)
+			}
+		}
+	}
+}
+
+// TestClassifyPopupHandlesDungeonBleed makes sure the loosened
+// menuLinePattern still flags an inventory popup as menu even when
+// every menu row is prefixed with dungeon characters.
+func TestClassifyPopupHandlesDungeonBleed(t *testing.T) {
+	raw := strings.Join([]string{
+		"-------             #   a - a +1 club",
+		"|.....|          ---|-- Armor    ('[')",
+		"|.....|   ##....|       e - a blessed +0 leather armor",
+		"|.....|          |..!.| Potions  ('!')",
+		"|.....|          |....| h - a fizzy potion",
+	}, "\n")
+	if got := classifyPopup(raw); got != roleMenu {
+		t.Errorf("dungeon-prefixed inventory misclassified as %s", got)
+	}
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, l := range lines {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }

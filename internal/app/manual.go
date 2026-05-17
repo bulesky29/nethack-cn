@@ -126,21 +126,6 @@ var extEntries = []entry{
 	{"#quit", "放弃当前角色（不可挽回）"},
 }
 
-var statusFieldEntries = []entry{
-	{"HP : N(M)", "当前 / 最大生命"},
-	{"Pw : N(M)", "当前 / 最大法力"},
-	{"AC : N", "护甲值；越低越好，负数最佳"},
-	{"Dlvl : N", "当前楼层"},
-	{"Xp : N", "经验等级"},
-	{"$ : N", "身上的金币"},
-	{"T : N", "总回合数"},
-	{"St Dx Co In Wi Ch", "力量 敏捷 体格 智力 感知 魅力"},
-	{"Lawful / Neutral / Chaotic", "守序 / 中立 / 混乱"},
-	{"Hungry → Weak → Fainting → Starving", "饥饿 → 虚弱 → 晕厥 → 濒死"},
-	{"Confused Stunned Hallu Blind", "困惑 眩晕 幻觉 失明"},
-	{"Burdened Stressed Strained", "背负 / 负担重 / 极限（速度↓）"},
-}
-
 var symbolEntries = []entry{
 	{"@", "你自己（或人类 NPC）"},
 	{"a-z A-Z", "怪物（k 狗头人, F 真菌, d 狗 ...）"},
@@ -242,11 +227,10 @@ func generateManual(path, fontPath string) error {
 
 	addTitle(m)
 	addHeroSection(m, "第一天必学", heroEntries)
+	addSymbolGrid(m, "地图符号速查", symbolEntries)
 	addTwoColSection(m, "战斗", combatEntries, "装备 / 物品", gearEntries)
 	addSection(m, "探索 / 互动", exploreEntries, bgSection)
 	addSection(m, "进阶 # 命令", extEntries, bgSection)
-	addSection(m, "状态条解读 (nh-helper 客户端顶部已实时翻译)", statusFieldEntries, bgSection)
-	addSymbolGrid(m, "地图符号速查", symbolEntries)
 	addTipsSection(m, "新手存活 Top 10", survivalTips)
 	addSection(m, "nh-helper 客户端使用", nhHelperHints, bgSection)
 	addFooter(m)

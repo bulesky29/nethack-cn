@@ -365,6 +365,33 @@ func writeIndented(body, colour string) {
 	}
 }
 
+// ClearMenuArea wipes the menu translation rows between the status
+// pane and the spinner row, parking the cursor at the top of the
+// scroll region so the next translation starts on a fresh line.
+//
+// Fired in response to a CLEAR_MENU wire event, which the host emits
+// when the in-game popup closes — gives the menu window a real-time
+// "shows what's open right now" feel instead of stacking history.
+//
+// No-op for clients without a status pane (text role doesn't receive
+// CLEAR_MENU anyway, but be defensive).
+func (u *ui) ClearMenuArea() {
+	if u == nil || !u.enabled || !u.hasStatusPane {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	// Clear every row from below the status pane up to but not
+	// including the spinner row at the very bottom. Spinner state is
+	// owned by the ticker — don't touch.
+	for r := u.statusRows + 1; r < u.rows; r++ {
+		fmt.Printf("\x1b[%d;1H%s", r, ansiClearLine)
+	}
+	// Park cursor at the scroll-region top so the next translation
+	// print starts on a clean line.
+	fmt.Printf("\x1b[%d;1H", u.statusRows+1)
+}
+
 // DrawStatus parses the raw two-row status into structured fields and
 // repaints the fixed pane with a coloured box, HP/Pw bars, and condition
 // badges. Safe to call concurrently. No-op when the UI has no status

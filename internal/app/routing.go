@@ -110,11 +110,22 @@ func readRoleHeader(conn net.Conn) (string, error) {
 
 // Popup classification ----------------------------------------------------
 
-// menuLinePattern matches the "<letter> - " prefix NetHack uses for menu
-// rows. Both lowercase and uppercase letters appear (e.g. capital
-// selectors like "A - All worn"). Spaces around the dash vary slightly
-// between menus so we allow a couple of forms.
-var menuLinePattern = regexp.MustCompile(`^[a-zA-Z]\s*-\s`)
+// menuLinePattern catches "<letter> - <thing>" menu rows anywhere on a
+// line — not just at the start. Inventory popups sit on top of the
+// dungeon view, so a row often looks like
+//
+//	|.....|   B - Items known to be Blessed
+//
+// and the menu selector is *inside* the line, prefixed by dungeon
+// noise. Matching with the embedded position lets classifyPopup count
+// these as menu lines (which is what they are) and lets the menu-
+// content extractor know where to slice from.
+var menuLinePattern = regexp.MustCompile(`[a-zA-Z$#]\s+-\s+\S`)
+
+// categoryHeaderPattern matches NetHack inventory section headers —
+// "Coins ('$')", "Weapons (')')", "Gems/Stones ('*')" — possibly
+// preceded by dungeon-map characters when the popup sits over the map.
+var categoryHeaderPattern = regexp.MustCompile(`[A-Z][a-zA-Z/]+(?:\s+[A-Z][a-zA-Z/]+)?\s+\([^)]+\)`)
 
 // farlookCardPattern catches single-line top-row messages that are
 // actually farlook detail dumps — they always lead with the entity's
@@ -143,6 +154,35 @@ var farlookCardPattern = regexp.MustCompile(`^[A-Za-z<>#@$\\]\s{4,}\S`)
 // updates — the player wants to glance at the menu window to see
 // what just landed in their pack.
 var pickupPattern = regexp.MustCompile(`^[a-zA-Z$#]\s+-\s+\S`)
+
+// extractMenuContent strips dungeon-map bleed-through from a menu
+// popup so the LLM sees a clean structured list. Per line:
+//
+//  1. If a "<letter> - <thing>" menu row appears anywhere, slice from
+//     its start position — leading dungeon noise (|.....|, --|--) is
+//     dropped.
+//  2. Otherwise if a "Category ('symbol')" header appears anywhere
+//     (possibly with dungeon noise in front), slice from there.
+//  3. Otherwise the line is pure dungeon noise — drop it entirely.
+//
+// Apply only to popups already classified as menu — narrative popups
+// (creation stories, role cards) have no menu rows and would get
+// completely emptied by this filter.
+func extractMenuContent(raw string) string {
+	out := make([]string, 0)
+	for _, line := range strings.Split(raw, "\n") {
+		if loc := menuLinePattern.FindStringIndex(line); loc != nil {
+			out = append(out, strings.TrimSpace(line[loc[0]:]))
+			continue
+		}
+		if loc := categoryHeaderPattern.FindStringIndex(line); loc != nil {
+			out = append(out, strings.TrimSpace(line[loc[0]:]))
+			continue
+		}
+		// Pure dungeon — skip silently.
+	}
+	return strings.Join(out, "\n")
+}
 
 // classifyMessage decides whether a top-row MSG event belongs in the
 // menu window (info cards, reference-y) or the text window (narrative,

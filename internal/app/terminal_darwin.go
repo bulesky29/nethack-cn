@@ -27,7 +27,11 @@ func spawnClientTerminal(debug bool, role string) error {
 	// Quote the path for AppleScript and the shell layer it invokes.
 	asEscapedPath := strings.ReplaceAll(exe, `\`, `\\`)
 	asEscapedPath = strings.ReplaceAll(asEscapedPath, `"`, `\"`)
-	shellCommand := fmt.Sprintf(`\"%s\" %s`, asEscapedPath, strings.Join(args, " "))
+	// Chain "; exit" so the surrounding shell quits when the binary
+	// returns. Without that the shell prompt comes back, and Terminal
+	// reports `busy of tab` = true (interactive shell counts as busy),
+	// so our polling loop never fires.
+	shellCommand := fmt.Sprintf(`\"%s\" %s; exit`, asEscapedPath, strings.Join(args, " "))
 
 	// Multi-line AppleScript: open a tab, hold the reference, poll
 	// `busy of tab` every half-second, then close the containing

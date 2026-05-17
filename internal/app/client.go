@@ -183,6 +183,9 @@ func RunClient(debug bool, role string) error {
 				// Pure local rendering — labels are translated by a
 				// fixed map, values pass through verbatim, no LLM call.
 				uiPane.DrawStatus(ev.text, st)
+			case eventKindClearMenu:
+				dbg.Raw("recv CLEAR_MENU")
+				uiPane.ClearMenuArea()
 			}
 		}
 	}
@@ -192,9 +195,10 @@ func RunClient(debug bool, role string) error {
 // (eventMsgPrefix, eventPopupBegin, eventPopupEnd, eventStatusBegin,
 // eventStatusEnd) are shared with host.go.
 const (
-	eventKindMessage = "msg"
-	eventKindPopup   = "popup"
-	eventKindStatus  = "status"
+	eventKindMessage   = "msg"
+	eventKindPopup     = "popup"
+	eventKindStatus    = "status"
+	eventKindClearMenu = "clear-menu"
 )
 
 type event struct {
@@ -237,6 +241,8 @@ func parseEvents(scanner *bufio.Scanner, out chan<- event) {
 		case line == eventStatusBegin:
 			inStatus = true
 			statusBuf = statusBuf[:0]
+		case line == eventClearMenu:
+			out <- event{kind: eventKindClearMenu}
 		case strings.HasPrefix(line, eventMsgPrefix):
 			out <- event{kind: eventKindMessage, text: strings.TrimPrefix(line, eventMsgPrefix)}
 		}

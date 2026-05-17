@@ -10,7 +10,11 @@ import (
 	"time"
 )
 
-// debugLog wraps two append-mode log files next to the binary:
+// logDirName is the on-disk directory that holds the per-run log files.
+// Sits next to the binary alongside db/.
+const logDirName = "log"
+
+// debugLog wraps two append-mode log files in <binaryDir>/log/:
 //   - nh-helper.raw.log: screen scans, wire events, filter decisions
 //   - nh-helper.translate.log: full LLM request/response transcripts
 //
@@ -46,8 +50,19 @@ func openDebugLog(enabled bool, side string) (*debugLog, error) {
 			err = derr
 			return
 		}
-		rawPath := filepath.Join(dir, "nh-helper.raw.log")
-		trPath := filepath.Join(dir, "nh-helper.translate.log")
+		logDir := filepath.Join(dir, logDirName)
+		if mkdirErr := os.MkdirAll(logDir, 0o755); mkdirErr != nil {
+			err = fmt.Errorf("mkdir %s: %w", logDir, mkdirErr)
+			return
+		}
+		rawPath := filepath.Join(logDir, "nh-helper.raw.log")
+		trPath := filepath.Join(logDir, "nh-helper.translate.log")
+
+		// One-shot migration: if a legacy *.log sits at the binary root
+		// from before the move, slide it into log/ so we don't lose
+		// history. Idempotent — only fires if the new path is empty.
+		migrateLegacyLogIfPresent(filepath.Join(dir, "nh-helper.raw.log"), rawPath)
+		migrateLegacyLogIfPresent(filepath.Join(dir, "nh-helper.translate.log"), trPath)
 
 		rawF, ferr := os.OpenFile(rawPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if ferr != nil {
@@ -94,6 +109,19 @@ func binaryDir() (string, error) {
 		exe = resolved
 	}
 	return filepath.Dir(exe), nil
+}
+
+// migrateLegacyLogIfPresent renames a legacy root-level log file into the
+// new log/ directory the first time we see it. Silent no-op if the
+// legacy file doesn't exist or if the target slot is already populated.
+func migrateLegacyLogIfPresent(legacy, target string) {
+	if _, err := os.Stat(target); err == nil {
+		return // target already exists, don't clobber
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		return // nothing to migrate
+	}
+	_ = os.Rename(legacy, target)
 }
 
 // Close flushes and closes both underlying log files.

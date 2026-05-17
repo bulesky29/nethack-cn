@@ -185,7 +185,7 @@ var nhHelperHints = []entry{
 	{"全屏弹窗", "整段抓取送翻，菜单 / 剧情 / 商店列表都按结构翻"},
 	{"翻译缓存", "重复内容只翻一次（SQLite 持久化），命中瞬出零费用"},
 	{"自动学词", "长文本翻完后异步抽 NetHack 术语进 glossary；人工词条永不被覆盖"},
-	{"-debug 标志", "启动加 -debug 写 nh-helper.{raw,translate}.log"},
+	{"-debug 标志", "启动加 -debug 写 log/nh-helper.{raw,translate}.log"},
 }
 
 // Generation -----------------------------------------------------------

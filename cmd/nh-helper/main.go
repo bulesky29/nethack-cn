@@ -14,7 +14,7 @@ import (
 func main() {
 	mode := flag.String("mode", "host", "Operating mode: host or client")
 	role := flag.String("role", "text", "Client role: text (action/narrative translations) or menu (status bar + menu/inventory popups)")
-	debug := flag.Bool("debug", false, "Write verbose logs to nh-helper.raw.log and nh-helper.translate.log next to the binary")
+	debug := flag.Bool("debug", false, "Write verbose logs to log/nh-helper.{raw,translate}.log next to the binary")
 	flag.Parse()
 
 	// Generate the Chinese reference manual on first launch. Idempotent —

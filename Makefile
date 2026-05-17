@@ -47,8 +47,9 @@ tidy:  ## go mod tidy
 	go mod tidy
 
 clean:  ## Remove built binaries and generated runtime files
-	rm -rf $(BINDIR)
-	rm -f nh-helper $(BINARY)-*.log nh-helper-手册.pdf
+	rm -rf $(BINDIR) log
+	rm -f nh-helper nh-helper.exe nh-helper-手册.pdf
+	rm -f nh-helper.raw.log nh-helper.translate.log  # legacy root paths
 
 release: clean tidy vet test build-all  ## Full pre-release pipeline
 	@echo "✓ release artefacts in $(BINDIR)/"

@@ -6,18 +6,19 @@
 # Local secrets — never commit
 /config.json
 
-# Runtime state: cache + glossary live database
+# Runtime state: cache + glossary live database, plus snapshots
+/db/
+
+# Legacy root-level DB / WAL files (auto-migrated into db/ on first launch)
 /nh-helper.db
 /nh-helper.db-wal
 /nh-helper.db-shm
 
-# Per-session DB snapshots
-/db/
-
 # Auto-generated reference manual (regenerated on first launch)
 /nh-helper-手册.pdf
 
-# Debug logs
+# Debug logs (now under log/, plus legacy root paths just in case)
+/log/
 /nh-helper.raw.log
 /nh-helper.translate.log
 

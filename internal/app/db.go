@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,14 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// dbDirName is the on-disk directory that holds both the live database
+// (no timestamp) and all timestamped snapshots written by Snapshot().
+const dbDirName = "db"
+
+// liveDBName is the canonical filename of the working database inside
+// dbDirName. Snapshots are siblings with a timestamp suffix.
+const liveDBName = "nh-helper.db"
 
 // store wraps the local SQLite database holding the translation cache and
 // the NetHack glossary. Concurrent use is safe — the underlying *sql.DB is
@@ -44,31 +53,125 @@ CREATE TABLE IF NOT EXISTS glossary (
 CREATE INDEX IF NOT EXISTS idx_glossary_category ON glossary(category);
 `
 
-// openStore opens (or creates) the SQLite file next to the binary and
-// applies the schema. The DSN sets sane single-user defaults: WAL mode for
-// concurrent readers, foreign keys on, busy timeout to ride out short
-// contention.
+// openStore opens (or creates) the SQLite database under db/ next to the
+// binary and applies the schema. The DSN sets sane single-user defaults:
+// WAL mode for concurrent readers, foreign keys on, busy timeout to ride
+// out short contention.
+//
+// Source-of-truth resolution, in order:
+//  1. db/nh-helper.db (the live database).
+//  2. A legacy nh-helper.db at the binary root from before the move —
+//     migrated into db/ on sight.
+//  3. The newest timestamped snapshot under db/ — copied into the live
+//     slot so the player keeps their accumulated cache + glossary.
+//  4. Otherwise we create a fresh db/nh-helper.db.
 func openStore() (*store, error) {
 	dir, err := binaryDir()
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, "nh-helper.db")
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	dbDir := filepath.Join(dir, dbDirName)
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", dbDir, err)
+	}
+	livePath := filepath.Join(dbDir, liveDBName)
 
+	if _, err := os.Stat(livePath); errors.Is(err, os.ErrNotExist) {
+		if src, restored := resolveLiveDBSource(dir, dbDir); src != "" {
+			if err := copyFile(src, livePath); err != nil {
+				return nil, fmt.Errorf("seed %s from %s: %w", livePath, src, err)
+			}
+			fmt.Printf("nh-helper: restored database from %s (%s)\n", src, restored)
+		}
+	}
+
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", livePath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, fmt.Errorf("open %s: %w", livePath, err)
 	}
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("ping %s: %w", path, err)
+		return nil, fmt.Errorf("ping %s: %w", livePath, err)
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 	return &store{db: db}, nil
+}
+
+// resolveLiveDBSource picks the best file to seed the live database from
+// when db/nh-helper.db doesn't yet exist. Returns ("", "") if there's
+// nothing to copy and we should start fresh.
+//
+// Second return is a short reason string for the console message
+// ("legacy root db", "latest snapshot", etc.).
+func resolveLiveDBSource(binaryDir, dbDir string) (string, string) {
+	// Legacy root-level DB from before the move into db/.
+	if legacy := filepath.Join(binaryDir, liveDBName); fileExists(legacy) {
+		return legacy, "legacy root location"
+	}
+	// Newest timestamped snapshot.
+	if snap := newestSnapshot(dbDir); snap != "" {
+		return snap, "newest snapshot"
+	}
+	return "", ""
+}
+
+// newestSnapshot returns the path of the most recently-modified
+// `nh-helper-*.db` file in dir, ignoring the live DB itself. Empty
+// string when there is none.
+func newestSnapshot(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var (
+		bestPath  string
+		bestMtime time.Time
+	)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == liveDBName || !strings.HasPrefix(name, "nh-helper-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(bestMtime) {
+			bestMtime = info.ModTime()
+			bestPath = filepath.Join(dir, name)
+		}
+	}
+	return bestPath
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
+// copyFile copies a file's contents and mode 0o644.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }
 
 func (s *store) Close() error {
@@ -189,10 +292,11 @@ func (s *store) CountGlossary() (int, error) {
 	return n, err
 }
 
-// Snapshot atomically copies the current database into ./db/ with a
+// Snapshot atomically copies the current database into db/ with a
 // timestamped filename, then prunes the directory to the most recent
 // `keep` snapshots. Uses SQLite's VACUUM INTO for a consistent point-in-
-// time copy (handles WAL correctly, no torn writes).
+// time copy (handles WAL correctly, no torn writes). The live DB
+// (db/nh-helper.db) sits alongside the snapshots and is never pruned.
 //
 // Returns the path of the new snapshot.
 func (s *store) Snapshot(keep int) (string, error) {
@@ -203,7 +307,7 @@ func (s *store) Snapshot(keep int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	snapDir := filepath.Join(dir, "db")
+	snapDir := filepath.Join(dir, dbDirName)
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", snapDir, err)
 	}

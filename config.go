@@ -39,6 +39,16 @@ type Config struct {
 	// defaultBaseURL (OpenRouter). Must point at the full /chat/completions
 	// path of an OpenAI-compatible API.
 	BaseURL string `json:"base_url,omitempty"`
+	// FastModel is a cheap / low-latency model used for short classification
+	// tasks (e.g. "is this popup a menu or narrative?"). Defaults to
+	// defaultFastModel when empty. Cost-wise it's roughly an order of
+	// magnitude cheaper than the main translation model.
+	FastModel string `json:"fast_model,omitempty"`
+	// FastBaseURL / FastAPIKey are optional — only set them if the fast
+	// model lives on a different provider. Empty values fall back to
+	// BaseURL / OpenRouterAPIKey.
+	FastBaseURL string `json:"fast_base_url,omitempty"`
+	FastAPIKey  string `json:"fast_api_key,omitempty"`
 }
 
 // configPath returns the absolute path to config.json sitting next to the
@@ -101,6 +111,15 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultBaseURL
+	}
+	if cfg.FastModel == "" {
+		cfg.FastModel = defaultFastModel
+	}
+	if cfg.FastBaseURL == "" {
+		cfg.FastBaseURL = cfg.BaseURL
+	}
+	if cfg.FastAPIKey == "" {
+		cfg.FastAPIKey = cfg.OpenRouterAPIKey
 	}
 }
 

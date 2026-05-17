@@ -43,26 +43,65 @@ func runHost(debug bool) error {
 	}
 	defer listener.Close()
 
-	if err := spawnClientTerminal(debug); err != nil {
-		return fmt.Errorf("spawn client: %w", err)
+	// Two windows: one for status + menus, one for narrative translations.
+	// They both connect back here and announce their role.
+	if err := spawnClientTerminal(debug, roleText); err != nil {
+		return fmt.Errorf("spawn text client: %w", err)
+	}
+	if err := spawnClientTerminal(debug, roleMenu); err != nil {
+		return fmt.Errorf("spawn menu client: %w", err)
 	}
 
-	fmt.Printf("nh-helper host: waiting for client on %s ...\n", localAddr)
-	if tl, ok := listener.(*net.TCPListener); ok {
-		_ = tl.SetDeadline(time.Now().Add(60 * time.Second))
-	}
-	conn, err := listener.Accept()
+	r := newRouter()
+	conns, err := acceptClients(listener, 2, 60*time.Second, r, dbg)
 	if err != nil {
-		return fmt.Errorf("accept client: %w", err)
+		return err
 	}
-	defer conn.Close()
-	dbg.Raw("client TCP accepted from %s", conn.RemoteAddr())
-	fmt.Println("Client connected. Establishing SSH session ...")
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	fmt.Println("Both clients connected. Establishing SSH session ...")
 
-	return runSession(cfg, conn, dbg)
+	return runSession(cfg, r, dbg)
 }
 
-func runSession(cfg *Config, conn net.Conn, dbg *debugLog) error {
+// acceptClients accepts `n` TCP connections, parses each one's role
+// header, and registers them with the router. Returns the raw conns
+// so the caller can close them on shutdown.
+func acceptClients(listener net.Listener, n int, timeout time.Duration, r *router, dbg *debugLog) ([]net.Conn, error) {
+	if tl, ok := listener.(*net.TCPListener); ok {
+		_ = tl.SetDeadline(time.Now().Add(timeout))
+	}
+	fmt.Printf("nh-helper host: waiting for %d clients on %s ...\n", n, localAddr)
+
+	var conns []net.Conn
+	for i := 0; i < n; i++ {
+		conn, err := listener.Accept()
+		if err != nil {
+			for _, c := range conns {
+				_ = c.Close()
+			}
+			return nil, fmt.Errorf("accept client %d/%d: %w", i+1, n, err)
+		}
+		role, err := readRoleHeader(conn)
+		if err != nil {
+			_ = conn.Close()
+			for _, c := range conns {
+				_ = c.Close()
+			}
+			return nil, fmt.Errorf("role header from %s: %w", conn.RemoteAddr(), err)
+		}
+		r.Register(role, conn)
+		conns = append(conns, conn)
+		dbg.Raw("client TCP accepted role=%s from=%s", role, conn.RemoteAddr())
+		fmt.Printf("  · role=%s connected\n", role)
+	}
+	return conns, nil
+}
+
+func runSession(cfg *Config, r *router, dbg *debugLog) error {
 	stdinFd := int(os.Stdin.Fd())
 	stdoutFd := int(os.Stdout.Fd())
 
@@ -209,11 +248,12 @@ func runSession(cfg *Config, conn net.Conn, dbg *debugLog) error {
 	}()
 
 	// Watch the screen for both top-row messages and full-screen popups
-	// (story dumps, menus, inventory) and ship events to the client.
+	// (story dumps, menus, inventory) and ship events to the router,
+	// which fan-outs to the menu / text clients per event type.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		watchScreen(ctx, vt, conn, dbg)
+		watchScreen(ctx, vt, r, dbg)
 	}()
 
 	// Detect end of SSH session.
@@ -275,7 +315,7 @@ type screenState struct {
 	topMessage string
 }
 
-func watchScreen(ctx context.Context, vt vt10x.Terminal, w io.Writer, dbg *debugLog) {
+func watchScreen(ctx context.Context, vt vt10x.Terminal, r *router, dbg *debugLog) {
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -295,17 +335,16 @@ func watchScreen(ctx context.Context, vt vt10x.Terminal, w io.Writer, dbg *debug
 				continue
 			}
 
-			// Status bar lives in the bottom two rows during play. We
-			// emit it independently of popup/message detection so the
-			// fixed-position pane in the client stays current even when
-			// the player is inside a menu.
+			// Status bar lives in the bottom two rows during play. It
+			// goes to the menu window unconditionally — the menu
+			// window's top-fixed pane re-paints on each update.
 			if status := extractStatus(lines); status != "" {
 				normalized := turnCounterPattern.ReplaceAllString(status, "T:_")
 				if normalized != lastStatusNorm {
 					lastStatusNorm = normalized
-					dbg.Raw("emit STATUS")
+					dbg.Raw("emit STATUS → menu")
 					dbg.RawBlock("status content", status)
-					if err := emitStatus(w, status); err != nil {
+					if err := emitStatus(r, status); err != nil {
 						dbg.Raw("emit STATUS failed: %v", err)
 						return
 					}
@@ -327,8 +366,10 @@ func watchScreen(ctx context.Context, vt vt10x.Terminal, w io.Writer, dbg *debug
 				}
 				lastPopup = state.popup
 				lastMsg = "" // a popup invalidates the message-area cache
-				dbg.Raw("emit POPUP: %d bytes, %d lines", len(state.popup), strings.Count(state.popup, "\n")+1)
-				if err := emitPopup(w, state.popup); err != nil {
+				kind := classifyPopup(state.popup)
+				dbg.Raw("emit POPUP → %s (%d bytes, %d lines)",
+					kind, len(state.popup), strings.Count(state.popup, "\n")+1)
+				if err := emitPopup(r, kind, state.popup); err != nil {
 					dbg.Raw("emit POPUP failed: %v", err)
 					return
 				}
@@ -342,12 +383,13 @@ func watchScreen(ctx context.Context, vt vt10x.Terminal, w io.Writer, dbg *debug
 			}
 			lastPopup = ""
 
+			// Top-row messages are always narrative — route to text.
 			if state.topMessage == "" || state.topMessage == lastMsg {
 				continue
 			}
 			lastMsg = state.topMessage
-			dbg.Raw("emit MSG: %q", state.topMessage)
-			if err := emitMessage(w, state.topMessage); err != nil {
+			dbg.Raw("emit MSG → text: %q", state.topMessage)
+			if err := emitMessage(r, state.topMessage); err != nil {
 				dbg.Raw("emit MSG failed: %v", err)
 				return
 			}
@@ -449,35 +491,26 @@ func extractTopMessage(lines []string) string {
 	return strings.TrimSpace(combined)
 }
 
-func emitMessage(w io.Writer, msg string) error {
-	_, err := fmt.Fprintln(w, eventMsgPrefix+msg)
-	return err
+func emitMessage(r *router, msg string) error {
+	return r.Send(roleText, eventMsgPrefix+msg)
 }
 
-func emitPopup(w io.Writer, popup string) error {
-	if _, err := fmt.Fprintln(w, eventPopupBegin); err != nil {
-		return err
-	}
-	for _, line := range strings.Split(popup, "\n") {
-		if _, err := fmt.Fprintln(w, line); err != nil {
-			return err
-		}
-	}
-	_, err := fmt.Fprintln(w, eventPopupEnd)
-	return err
+func emitPopup(r *router, role, popup string) error {
+	lines := strings.Split(popup, "\n")
+	out := make([]string, 0, len(lines)+2)
+	out = append(out, eventPopupBegin)
+	out = append(out, lines...)
+	out = append(out, eventPopupEnd)
+	return r.SendLines(role, out...)
 }
 
-func emitStatus(w io.Writer, status string) error {
-	if _, err := fmt.Fprintln(w, eventStatusBegin); err != nil {
-		return err
-	}
-	for _, line := range strings.Split(status, "\n") {
-		if _, err := fmt.Fprintln(w, line); err != nil {
-			return err
-		}
-	}
-	_, err := fmt.Fprintln(w, eventStatusEnd)
-	return err
+func emitStatus(r *router, status string) error {
+	lines := strings.Split(status, "\n")
+	out := make([]string, 0, len(lines)+2)
+	out = append(out, eventStatusBegin)
+	out = append(out, lines...)
+	out = append(out, eventStatusEnd)
+	return r.SendLines(roleMenu, out...)
 }
 
 func readRow(vt vt10x.Terminal, y, cols int) string {
@@ -495,8 +528,8 @@ func readRow(vt vt10x.Terminal, y, cols int) string {
 }
 
 // spawnClientTerminal opens a new Terminal.app window running this binary in
-// client mode, so the user gets the translation pane side-by-side.
-func spawnClientTerminal(debug bool) error {
+// client mode with the given role, so each role gets its own window.
+func spawnClientTerminal(debug bool, role string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -512,7 +545,7 @@ func spawnClientTerminal(debug bool) error {
 	if debug {
 		debugFlag = " -debug"
 	}
-	shellCommand := fmt.Sprintf(`\"%s\" -mode client%s`, asEscapedPath, debugFlag)
+	shellCommand := fmt.Sprintf(`\"%s\" -mode client -role %s%s`, asEscapedPath, role, debugFlag)
 	script := fmt.Sprintf(`tell application "Terminal" to do script "%s"`, shellCommand)
 
 	cmd := exec.Command("osascript", "-e", script)

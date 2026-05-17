@@ -21,7 +21,9 @@ import (
 type ui struct {
 	mu             sync.Mutex
 	enabled        bool
-	statusRows     int // height of the fixed pane
+	role           string // roleMenu vs roleText — drives layout decisions
+	hasStatusPane  bool   // menu role pins a status pane at the top
+	statusRows     int    // height of the fixed pane when hasStatusPane
 	cols, rows     int
 	lastStatusHash string // dedupes redundant redraws
 }
@@ -53,37 +55,49 @@ const (
 	ansiBgRed         = "\x1b[41m"
 )
 
-func newUI() *ui {
+func newUI(role string) *ui {
 	fd := int(os.Stdout.Fd())
 	if !term.IsTerminal(fd) {
-		return &ui{enabled: false}
+		return &ui{enabled: false, role: role}
 	}
 	cols, rows, err := term.GetSize(fd)
-	if err != nil || rows < statusPaneRows+4 {
-		return &ui{enabled: false}
+	if err != nil {
+		return &ui{enabled: false, role: role}
+	}
+	hasStatus := role == roleMenu
+	if hasStatus && rows < statusPaneRows+4 {
+		hasStatus = false
 	}
 	return &ui{
-		enabled:    true,
-		statusRows: statusPaneRows,
-		cols:       cols,
-		rows:       rows,
+		enabled:       true,
+		role:          role,
+		hasStatusPane: hasStatus,
+		statusRows:    statusPaneRows,
+		cols:          cols,
+		rows:          rows,
 	}
 }
 
-// Init reserves the top statusRows lines for the status pane and parks
-// the cursor just below them so subsequent normal output flows in the
-// scroll region.
+// Init reserves the top statusRows lines for the status pane (menu role
+// only) and parks the cursor below them so subsequent normal output flows
+// in the scroll region. Text role gets a full-screen scroll region with
+// no fixed pane.
 func (u *ui) Init() {
 	if u == nil || !u.enabled {
 		return
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.hasStatusPane {
+		fmt.Print(ansiClearScreen)
+		fmt.Printf("\x1b[%d;%dr", u.statusRows+1, u.rows)
+		fmt.Printf("\x1b[%d;1H", u.statusRows+1)
+		u.drawFrameLocked(emptyFrame(u.cols))
+		return
+	}
+	// Text role: just clear screen and let everything scroll naturally.
 	fmt.Print(ansiClearScreen)
-	fmt.Printf("\x1b[%d;%dr", u.statusRows+1, u.rows)
-	fmt.Printf("\x1b[%d;1H", u.statusRows+1)
-	// Draw an empty frame so the user sees the layout immediately.
-	u.drawFrameLocked(emptyFrame(u.cols))
+	fmt.Print("\x1b[1;1H")
 }
 
 // Restore returns the terminal scroll region to its default before exit.
@@ -93,11 +107,14 @@ func (u *ui) Restore() {
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	fmt.Print(ansiResetScroll)
+	if u.hasStatusPane {
+		fmt.Print(ansiResetScroll)
+	}
 }
 
 // PrintTranslation writes a source/translation pair with a subtle divider
-// and indented bodies, locked against status redraws.
+// and indented bodies, locked against status redraws. Used by the text
+// role for streaming narrative content.
 func (u *ui) PrintTranslation(text, out string, stamp string) {
 	if u == nil || !u.enabled {
 		fmt.Printf("\n[%s] %s\n%s\n", stamp, text, out)
@@ -111,6 +128,56 @@ func (u *ui) PrintTranslation(text, out string, stamp string) {
 	writeIndented(text, ansiDim)
 	fmt.Println()
 	writeIndented(out, "")
+}
+
+// PrintMenu renders a translated menu / inventory popup. It de-emphasises
+// the noisy source (often laced with dungeon-map ASCII bleed-through) by
+// only showing a compact preview, and frames the translation in a box.
+func (u *ui) PrintMenu(text, out string, stamp string) {
+	if u == nil || !u.enabled {
+		fmt.Printf("\n[%s 菜单] %s\n", stamp, out)
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	headerLeft := fmt.Sprintf("═ 菜单 / 选项  %s ", stamp)
+	headerWidth := u.cols - visibleWidth(headerLeft) - 1
+	if headerWidth < 0 {
+		headerWidth = 0
+	}
+	fmt.Printf("\n%s%s%s%s\n", ansiBold, ansiCyan, headerLeft, strings.Repeat("═", headerWidth)+ansiReset)
+	// One-line source preview, dim, truncated — the LLM has the full one.
+	preview := strings.ReplaceAll(text, "\n", "  ·  ")
+	if w := visibleWidth(preview); w > u.cols-4 {
+		preview = truncateRunes(preview, u.cols-7) + "..."
+	}
+	fmt.Printf("%s  %s%s\n", ansiDim, preview, ansiReset)
+	for _, line := range strings.Split(out, "\n") {
+		fmt.Printf("  %s\n", line)
+	}
+}
+
+// truncateRunes returns a string clipped to at most n columns of display
+// width, honouring CJK double-wide cells.
+func truncateRunes(s string, n int) string {
+	var b strings.Builder
+	w := 0
+	for _, r := range s {
+		rw := 1
+		if r >= 0x1100 && (r >= 0x2e80 && r <= 0xa4cf ||
+			r >= 0xac00 && r <= 0xd7a3 ||
+			r >= 0xf900 && r <= 0xfaff ||
+			r >= 0xff00 && r <= 0xff60) {
+			rw = 2
+		}
+		if w+rw > n {
+			break
+		}
+		b.WriteRune(r)
+		w += rw
+	}
+	return b.String()
 }
 
 // writeIndented prints `body` to stdout, every line prefixed with two
@@ -128,9 +195,10 @@ func writeIndented(body, colour string) {
 
 // DrawStatus parses the raw two-row status into structured fields and
 // repaints the fixed pane with a coloured box, HP/Pw bars, and condition
-// badges. Safe to call concurrently.
+// badges. Safe to call concurrently. No-op when the UI has no status
+// pane (text role).
 func (u *ui) DrawStatus(raw string, store *store) {
-	if u == nil || !u.enabled {
+	if u == nil || !u.enabled || !u.hasStatusPane {
 		return
 	}
 	frame := renderStatusFrame(parseStatus(raw, store), u.cols)
@@ -328,7 +396,7 @@ func paneWidth(cols int) int {
 	return cols
 }
 
-// buildHeader → "Bulesky29 · 穴居人 (Troglodyte) · 守序 · T 129"
+// buildHeader → "Bulesky29 · 穴居人 (Troglodyte) · 守序 · 回合 129"
 func buildHeader(f statusFields) string {
 	var parts []string
 	if f.name != "" {
@@ -347,42 +415,42 @@ func buildHeader(f statusFields) string {
 		parts = append(parts, colourAlign(f.align))
 	}
 	if f.turn != "" {
-		parts = append(parts, ansiDim+"T "+f.turn+ansiReset)
+		parts = append(parts, ansiDim+"回合 "+f.turn+ansiReset)
 	}
 	return strings.Join(parts, ansiDim+" · "+ansiReset)
 }
 
-// buildVitalsRow → HP bar, Pw bar, AC, Xp, Dlvl, gold.
+// buildVitalsRow → HP bar, Pw bar, AC, Xp, Dlvl, gold — all Chinese labels.
 func buildVitalsRow(f statusFields) string {
 	var parts []string
 	if f.hpMax > 0 {
-		parts = append(parts, fmt.Sprintf("%sHP%s %s %s%d/%d%s",
+		parts = append(parts, fmt.Sprintf("%s生命%s %s %s%d/%d%s",
 			ansiDim, ansiReset,
 			renderBar(f.hp, f.hpMax, 10, hpPalette(f.hp, f.hpMax)),
 			hpPalette(f.hp, f.hpMax), f.hp, f.hpMax, ansiReset))
 	}
 	if f.pwMax > 0 {
-		parts = append(parts, fmt.Sprintf("%sPw%s %s %s%d/%d%s",
+		parts = append(parts, fmt.Sprintf("%s法力%s %s %s%d/%d%s",
 			ansiDim, ansiReset,
 			renderBar(f.pw, f.pwMax, 8, ansiBrightMagenta),
 			ansiMagenta, f.pw, f.pwMax, ansiReset))
 	}
 	if f.ac != "" {
-		parts = append(parts, fmt.Sprintf("%sAC%s %s%s%s", ansiDim, ansiReset, ansiBold, f.ac, ansiReset))
+		parts = append(parts, fmt.Sprintf("%s护甲%s %s%s%s", ansiDim, ansiReset, ansiBold, f.ac, ansiReset))
 	}
 	if f.xp != "" {
-		parts = append(parts, fmt.Sprintf("%sXp%s %s", ansiDim, ansiReset, f.xp))
+		parts = append(parts, fmt.Sprintf("%s经验%s %s", ansiDim, ansiReset, f.xp))
 	}
 	if f.dlvl != "" {
 		parts = append(parts, fmt.Sprintf("%s楼层%s %s%s%s", ansiDim, ansiReset, ansiBold, f.dlvl, ansiReset))
 	}
 	if f.gold != "" {
-		parts = append(parts, fmt.Sprintf("%s$%s %s%s%s", ansiYellow, ansiReset, ansiBrightYellow, f.gold, ansiReset))
+		parts = append(parts, fmt.Sprintf("%s金币%s %s%s%s", ansiYellow, ansiReset, ansiBrightYellow, f.gold, ansiReset))
 	}
 	return strings.Join(parts, "   ")
 }
 
-// buildStatsRow → six attribute scalars + condition badges.
+// buildStatsRow → six attribute scalars + condition badges, Chinese labels.
 func buildStatsRow(f statusFields) string {
 	var parts []string
 	add := func(label, val string) {
@@ -391,12 +459,12 @@ func buildStatsRow(f statusFields) string {
 		}
 		parts = append(parts, fmt.Sprintf("%s%s%s %s", ansiDim, label, ansiReset, val))
 	}
-	add("St", f.st)
-	add("Dx", f.dx)
-	add("Co", f.co)
-	add("In", f.in)
-	add("Wi", f.wi)
-	add("Ch", f.ch)
+	add("力量", f.st)
+	add("敏捷", f.dx)
+	add("体格", f.co)
+	add("智力", f.in)
+	add("感知", f.wi)
+	add("魅力", f.ch)
 
 	row := strings.Join(parts, "  ")
 	if len(f.conditions) > 0 {

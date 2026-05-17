@@ -13,6 +13,7 @@ const (
 
 func main() {
 	mode := flag.String("mode", "host", "Operating mode: host or client")
+	role := flag.String("role", "text", "Client role: text (action/narrative translations) or menu (status bar + menu/inventory popups)")
 	debug := flag.Bool("debug", false, "Write verbose logs to nh-helper.raw.log and nh-helper.translate.log next to the binary")
 	flag.Parse()
 
@@ -30,7 +31,11 @@ func main() {
 	case "host":
 		err = runHost(*debug)
 	case "client":
-		err = runClient(*debug)
+		if *role != roleText && *role != roleMenu {
+			fmt.Fprintf(os.Stderr, "unknown role: %s (expected text or menu)\n", *role)
+			os.Exit(2)
+		}
+		err = runClient(*debug, *role)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mode: %s (expected host or client)\n", *mode)
 		os.Exit(2)

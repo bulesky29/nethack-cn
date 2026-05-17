@@ -21,18 +21,26 @@ import (
 
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1/chat/completions"
-	defaultModel   = "google/gemini-2.5-flash"
+	defaultModel   = "anthropic/claude-haiku-4.5"
+	// defaultFastModel runs short classification tasks (popup categorization,
+	// etc.) — picked for low latency and ~10× lower per-token cost than the
+	// main translation model.
+	defaultFastModel = "google/gemini-2.5-flash-lite"
 )
 
 // runClient connects to the host process, filters trivial NetHack messages,
 // and ships interesting ones to OpenRouter for Chinese translation.
-func runClient(debug bool) error {
-	dbg, err := openDebugLog(debug, "client")
+// The role determines what kinds of events this client will receive:
+//
+//	roleText: streaming MSG batches + narrative POPUPs
+//	roleMenu: STATUS bar + menu/inventory POPUPs (status pane visible)
+func runClient(debug bool, role string) error {
+	dbg, err := openDebugLog(debug, "client-"+role)
 	if err != nil {
 		return fmt.Errorf("open debug log: %w", err)
 	}
 	defer dbg.Close()
-	dbg.Raw("client start: debug=%v", debug)
+	dbg.Raw("client start: debug=%v role=%s", debug, role)
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -58,17 +66,21 @@ func runClient(debug bool) error {
 	}
 	dbg.Raw("db opened, glossary terms=%d", mustCount(st))
 
-	uiPane := newUI()
+	uiPane := newUI(role)
 	uiPane.Init()
 	defer uiPane.Restore()
 
-	fmt.Println("nh-helper client: connecting to host ...")
+	fmt.Printf("nh-helper client (role=%s): connecting to host ...\n", role)
 	conn, err := dialHost(15 * time.Second)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	fmt.Println("Connected. Streaming NetHack messages.")
+	// Announce our role so the host's router knows where to send events.
+	if _, err := fmt.Fprintf(conn, "%s %s\n", roleHeader, role); err != nil {
+		return fmt.Errorf("send role header: %w", err)
+	}
+	fmt.Printf("Connected as %s. Waiting for events ...\n", role)
 	fmt.Println(strings.Repeat("-", 60))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -109,7 +121,7 @@ func runClient(debug bool) error {
 		pendingMu.Unlock()
 
 		dbg.Raw("flush batch: %d msgs, %d bytes", n, len(batch))
-		go translator.translate(ctx, batch)
+		go translator.translate(ctx, batch, displayNarrative)
 	}
 
 	events := make(chan event, 128)
@@ -159,9 +171,9 @@ func runClient(debug bool) error {
 					dbg.Raw("POPUP dropped by filter: %s", reason)
 					continue
 				}
-				dbg.Raw("POPUP queued for translation")
+				dbg.Raw("POPUP queued for translation (display kind=%s)", popupDisplayKind(role))
 				recent = "" // popup may overwrite message area on exit
-				go translator.translate(ctx, ev.text)
+				go translator.translate(ctx, ev.text, popupDisplayKind(role))
 			case eventKindStatus:
 				dbg.Raw("recv STATUS: %d bytes", len(ev.text))
 				// Pure local rendering — labels are translated by a
@@ -402,10 +414,27 @@ TRANSLATION RULES:
 5. For [ynaq]-style or "Direction?" prompts, translate the question but keep the bracketed key letters / hotkeys unchanged so the player can still type the right key.
 6. For terse farlook output like "kobold" or "lit corridor", just translate the noun phrase directly (e.g. "狗头人", "明亮的走廊"). No need to expand into a sentence.`
 
-func (t *translator) translate(ctx context.Context, text string) {
+// Display kinds for translated output — selects which UI method gets
+// called when the translation is ready.
+const (
+	displayNarrative = "narrative" // streaming source/translation pair
+	displayMenu      = "menu"      // boxed menu / option card
+)
+
+// popupDisplayKind picks the right display kind for a popup arriving at
+// a client of the given role. Menu role popups have already been
+// classified server-side as menu-shaped content.
+func popupDisplayKind(role string) string {
+	if role == roleMenu {
+		return displayMenu
+	}
+	return displayNarrative
+}
+
+func (t *translator) translate(ctx context.Context, text, kind string) {
 	if cached, ok := t.store.GetTranslation(text); ok {
-		t.dbg.Translate("cache hit: input_bytes=%d", len(text))
-		t.display(text, cached)
+		t.dbg.Translate("cache hit: input_bytes=%d kind=%s", len(text), kind)
+		t.display(text, cached, kind)
 		return
 	}
 
@@ -503,7 +532,7 @@ func (t *translator) translate(ctx context.Context, text string) {
 	if err := t.store.PutTranslation(text, out, t.cfg.Model); err != nil {
 		t.dbg.Translate("req #%d cache write failed: %v", id, err)
 	}
-	t.display(text, out)
+	t.display(text, out, kind)
 
 	// Fire-and-forget glossary curation. We only bother for substantial
 	// content (popups, long messages) to avoid doubling the API bill on
@@ -513,12 +542,17 @@ func (t *translator) translate(ctx context.Context, text string) {
 	}
 }
 
-// display prints a source/translation pair to stdout with a timestamp.
-// The UI mutex inside ui.PrintTranslation serializes against status pane
-// redraws so the cursor positioning stays clean.
-func (t *translator) display(text, out string) {
+// display prints a source/translation pair to stdout with a timestamp,
+// using the UI method appropriate for the kind. The UI mutex serializes
+// against status-pane redraws so the cursor positioning stays clean.
+func (t *translator) display(text, out, kind string) {
 	stamp := time.Now().Format("15:04:05")
-	t.ui.PrintTranslation(text, out, stamp)
+	switch kind {
+	case displayMenu:
+		t.ui.PrintMenu(text, out, stamp)
+	default:
+		t.ui.PrintTranslation(text, out, stamp)
+	}
 }
 
 // buildUserMessage prepends glossary hints (if any) to the raw NetHack text

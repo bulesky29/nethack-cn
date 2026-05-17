@@ -271,7 +271,11 @@ var (
 	}
 
 	trivialPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^You see here\s`),
+		// Only filter "You see here N gold pieces." — bare gold counts
+		// are clutter. Real items ("You see here a crude dagger.",
+		// "...a scroll labeled VENZAR BORGAVVE.") are useful and must
+		// be translated.
+		regexp.MustCompile(`^You see here \d+ gold pieces?\.?$`),
 		regexp.MustCompile(`^You move\b`),
 		regexp.MustCompile(`^(North|South|East|West|Northeast|Northwest|Southeast|Southwest)\.?$`),
 		regexp.MustCompile(`^Pick up what\?`),
@@ -441,6 +445,12 @@ func (t *translator) translate(ctx context.Context, text, kind string) {
 		t.display(text, cached, kind)
 		return
 	}
+
+	// Mark in-flight for the spinner — only for the real API call, not
+	// cache hits / glossary extraction (those don't block user-visible
+	// output).
+	t.ui.BeginTranslation()
+	defer t.ui.EndTranslation()
 
 	id := t.seq.Add(1)
 	started := time.Now()

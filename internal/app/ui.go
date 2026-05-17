@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -35,6 +37,13 @@ type ui struct {
 	refreshMode bool         // alt-screen + clear-and-redraw on every print
 	recentMax   int          // how many recent items to keep on screen
 	recent      []recentItem // ring of the last N translations
+
+	// Spinner state — in-flight translation indicator pinned to the
+	// bottom row. Both roles use it; the menu role reserves its
+	// scroll-region bottom so spinner output doesn't get scrolled.
+	pendingTrans atomic.Int32
+	spinnerStop  chan struct{}
+	spinnerDone  chan struct{}
 }
 
 // recentItem is one entry in the refresh-mode rolling buffer.
@@ -115,29 +124,33 @@ func (u *ui) Init() {
 		return
 	}
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	if u.refreshMode {
 		fmt.Print(ansiEnterAlt)
 		fmt.Print(ansiHomeClearDown)
-		return
-	}
-	if u.hasStatusPane {
+	} else if u.hasStatusPane {
 		fmt.Print(ansiClearScreen)
-		fmt.Printf("\x1b[%d;%dr", u.statusRows+1, u.rows)
+		// Bottom of scroll region is rows-1 so the very last row stays
+		// reserved for the translation-in-flight spinner.
+		fmt.Printf("\x1b[%d;%dr", u.statusRows+1, u.rows-1)
 		fmt.Printf("\x1b[%d;1H", u.statusRows+1)
 		u.drawFrameLocked(emptyFrame(u.cols))
-		return
+	} else {
+		fmt.Print(ansiClearScreen)
+		fmt.Print("\x1b[1;1H")
 	}
-	fmt.Print(ansiClearScreen)
-	fmt.Print("\x1b[1;1H")
+	u.mu.Unlock()
+
+	u.startSpinner()
 }
 
-// Restore undoes Init: leaves the alternate screen / resets the scroll
-// region so the user's terminal is back to its pre-launch state.
+// Restore undoes Init: stops the spinner, leaves the alternate screen /
+// resets the scroll region so the user's terminal is back to its
+// pre-launch state.
 func (u *ui) Restore() {
 	if u == nil || !u.enabled {
 		return
 	}
+	u.stopSpinner()
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.refreshMode {
@@ -147,6 +160,96 @@ func (u *ui) Restore() {
 	if u.hasStatusPane {
 		fmt.Print(ansiResetScroll)
 	}
+}
+
+// BeginTranslation / EndTranslation bump the in-flight translation
+// counter. The spinner goroutine watches the counter and shows / hides
+// the bottom-row indicator accordingly. Both calls are atomic and safe
+// from any goroutine.
+func (u *ui) BeginTranslation() {
+	if u == nil || !u.enabled {
+		return
+	}
+	u.pendingTrans.Add(1)
+}
+
+func (u *ui) EndTranslation() {
+	if u == nil || !u.enabled {
+		return
+	}
+	u.pendingTrans.Add(-1)
+}
+
+// startSpinner kicks off the bottom-row indicator ticker. Idempotent.
+func (u *ui) startSpinner() {
+	if u == nil || !u.enabled || u.spinnerStop != nil {
+		return
+	}
+	u.spinnerStop = make(chan struct{})
+	u.spinnerDone = make(chan struct{})
+	go u.spinnerLoop()
+}
+
+// stopSpinner halts the ticker and clears the bottom row before
+// returning so the user's terminal doesn't have a leftover spinner.
+func (u *ui) stopSpinner() {
+	if u == nil || u.spinnerStop == nil {
+		return
+	}
+	close(u.spinnerStop)
+	<-u.spinnerDone
+	u.mu.Lock()
+	u.clearSpinnerLineLocked()
+	u.mu.Unlock()
+	u.spinnerStop = nil
+	u.spinnerDone = nil
+}
+
+// spinnerLoop ticks every ~100ms, drawing the current frame when
+// pending > 0 and clearing the row when it drops to zero.
+func (u *ui) spinnerLoop() {
+	defer close(u.spinnerDone)
+	frames := []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+	idx := 0
+	ticker := time.NewTicker(110 * time.Millisecond)
+	defer ticker.Stop()
+	var lastDrawn int32 = -1
+	for {
+		select {
+		case <-u.spinnerStop:
+			return
+		case <-ticker.C:
+			n := u.pendingTrans.Load()
+			u.mu.Lock()
+			if n > 0 {
+				u.drawSpinnerLineLocked(frames[idx], int(n))
+				idx = (idx + 1) % len(frames)
+				lastDrawn = n
+			} else if lastDrawn != 0 {
+				u.clearSpinnerLineLocked()
+				lastDrawn = 0
+			}
+			u.mu.Unlock()
+		}
+	}
+}
+
+func (u *ui) drawSpinnerLineLocked(frame rune, count int) {
+	fmt.Print(ansiSaveCursor)
+	fmt.Printf("\x1b[%d;1H%s", u.rows, ansiClearLine)
+	label := "翻译中"
+	if count > 1 {
+		fmt.Printf("%s%c%s %s%s × %d%s", ansiBrightMagenta, frame, ansiReset, ansiDim, label, count, ansiReset)
+	} else {
+		fmt.Printf("%s%c%s %s%s%s", ansiBrightMagenta, frame, ansiReset, ansiDim, label, ansiReset)
+	}
+	fmt.Print(ansiRestoreCursor)
+}
+
+func (u *ui) clearSpinnerLineLocked() {
+	fmt.Print(ansiSaveCursor)
+	fmt.Printf("\x1b[%d;1H%s", u.rows, ansiClearLine)
+	fmt.Print(ansiRestoreCursor)
 }
 
 // PrintTranslation writes a source/translation pair with a subtle divider

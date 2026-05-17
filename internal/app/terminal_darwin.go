@@ -11,6 +11,13 @@ import (
 // spawnClientTerminal opens a new Terminal.app window running this binary
 // in client mode with the given role. Uses AppleScript via /usr/bin/
 // osascript — works on every Mac without extra dependencies.
+//
+// The AppleScript also waits for the binary to exit (Terminal's tab
+// reports `busy = false` once the foreground process is gone) and then
+// closes the window. So when the host process dies, every client's TCP
+// socket EOFs → client process exits → its window auto-closes. The
+// player only has to Ctrl-C the host terminal; the two side windows
+// follow.
 func spawnClientTerminal(debug bool, role string) error {
 	exe, args, err := clientExeAndArgs(debug, role)
 	if err != nil {
@@ -21,7 +28,21 @@ func spawnClientTerminal(debug bool, role string) error {
 	asEscapedPath := strings.ReplaceAll(exe, `\`, `\\`)
 	asEscapedPath = strings.ReplaceAll(asEscapedPath, `"`, `\"`)
 	shellCommand := fmt.Sprintf(`\"%s\" %s`, asEscapedPath, strings.Join(args, " "))
-	script := fmt.Sprintf(`tell application "Terminal" to do script "%s"`, shellCommand)
+
+	// Multi-line AppleScript: open a tab, hold the reference, poll
+	// `busy of tab` every half-second, then close the containing
+	// window. The `try` swallows the case where the user closed the
+	// window manually first.
+	script := fmt.Sprintf(`tell application "Terminal"
+    set newTab to (do script "%s")
+    try
+        set targetWindow to first window whose tabs contains newTab
+        repeat while busy of newTab
+            delay 0.5
+        end repeat
+        close targetWindow saving no
+    end try
+end tell`, shellCommand)
 
 	cmd := exec.Command("osascript", "-e", script)
 	cmd.Stdout = nil

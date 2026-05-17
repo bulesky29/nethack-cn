@@ -191,7 +191,7 @@ var nhHelperHints = []entry{
 // Generation -----------------------------------------------------------
 
 func EnsureManual() (string, bool, error) {
-	dir, err := binaryDir()
+	dir, err := dataDir()
 	if err != nil {
 		return "", false, err
 	}

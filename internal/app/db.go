@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_glossary_category ON glossary(category);
 //     slot so the player keeps their accumulated cache + glossary.
 //  4. Otherwise we create a fresh db/nh-helper.db.
 func openStore() (*store, error) {
-	dir, err := binaryDir()
+	dir, err := dataDir()
 	if err != nil {
 		return nil, err
 	}
@@ -107,9 +107,9 @@ func openStore() (*store, error) {
 //
 // Second return is a short reason string for the console message
 // ("legacy root db", "latest snapshot", etc.).
-func resolveLiveDBSource(binaryDir, dbDir string) (string, string) {
+func resolveLiveDBSource(rootDir, dbDir string) (string, string) {
 	// Legacy root-level DB from before the move into db/.
-	if legacy := filepath.Join(binaryDir, liveDBName); fileExists(legacy) {
+	if legacy := filepath.Join(rootDir, liveDBName); fileExists(legacy) {
 		return legacy, "legacy root location"
 	}
 	// Newest timestamped snapshot.
@@ -303,7 +303,7 @@ func (s *store) Snapshot(keep int) (string, error) {
 	if s == nil {
 		return "", nil
 	}
-	dir, err := binaryDir()
+	dir, err := dataDir()
 	if err != nil {
 		return "", err
 	}

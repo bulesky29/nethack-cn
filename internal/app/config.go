@@ -51,18 +51,15 @@ type Config struct {
 	FastAPIKey  string `json:"fast_api_key,omitempty"`
 }
 
-// configPath returns the absolute path to config.json sitting next to the
-// running executable. Symlinks are resolved so a brew-installed shim still
-// points back at the real install dir.
+// configPath returns the absolute path to config.json inside the resolved
+// data directory (see dataDir() — checks binary's own dir then parent so
+// `bin/nh-helper` can pick up `../config.json`).
 func configPath() (string, error) {
-	exe, err := os.Executable()
+	dir, err := dataDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve executable: %w", err)
+		return "", fmt.Errorf("resolve data dir: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-	return filepath.Join(filepath.Dir(exe), "config.json"), nil
+	return filepath.Join(dir, "config.json"), nil
 }
 
 // loadConfig reads config.json, prompting for credentials on first launch.

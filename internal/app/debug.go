@@ -14,7 +14,7 @@ import (
 // Sits next to the binary alongside db/.
 const logDirName = "log"
 
-// debugLog wraps two append-mode log files in <binaryDir>/log/:
+// debugLog wraps two append-mode log files in <dataDir>/log/:
 //   - nh-helper.raw.log: screen scans, wire events, filter decisions
 //   - nh-helper.translate.log: full LLM request/response transcripts
 //
@@ -45,7 +45,7 @@ func openDebugLog(enabled bool, side string) (*debugLog, error) {
 		err error
 	)
 	debugOnce.Do(func() {
-		dir, derr := binaryDir()
+		dir, derr := dataDir()
 		if derr != nil {
 			err = derr
 			return
@@ -100,6 +100,9 @@ func openDebugLog(enabled bool, side string) (*debugLog, error) {
 	return out, nil
 }
 
+// binaryDir resolves the directory containing the running executable.
+// Symlinks are followed so a brew-installed shim still points back at
+// the real install dir.
 func binaryDir() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -109,6 +112,56 @@ func binaryDir() (string, error) {
 		exe = resolved
 	}
 	return filepath.Dir(exe), nil
+}
+
+// dataMarkers are the files/directories whose presence in a directory
+// flags it as an existing nh-helper data root. Any one of them is
+// enough — config.json on its own, or just db/, or just log/.
+var dataMarkers = []string{"config.json", dbDirName, logDirName}
+
+// dataDir returns the directory used to anchor config.json, db/, log/,
+// and the generated PDF manual. See resolveDataDir for the policy.
+func dataDir() (string, error) {
+	bd, err := binaryDir()
+	if err != nil {
+		return "", err
+	}
+	return resolveDataDir(bd), nil
+}
+
+// resolveDataDir applies the data-directory probe policy to a given
+// binary directory. Pure function — extracted from dataDir so it can be
+// unit-tested without mocking os.Executable.
+//
+// Resolution order, first-match wins:
+//
+//  1. The binary's own directory, if any data markers are already there.
+//  2. The binary's parent directory, if it has data markers — this is
+//     the common case when the binary lives in <project>/bin/ and the
+//     user keeps config.json / db/ / log/ at the project root.
+//  3. The binary's own directory (fresh-install default).
+//
+// Makes the binary equally happy launched as `./bin/nh-helper` from the
+// project root *or* `./nh-helper` after copying it next to its own
+// config — without any flag or env var.
+func resolveDataDir(binDir string) string {
+	if hasDataMarkers(binDir) {
+		return binDir
+	}
+	parent := filepath.Dir(binDir)
+	if parent != "" && parent != binDir && hasDataMarkers(parent) {
+		return parent
+	}
+	return binDir
+}
+
+func hasDataMarkers(dir string) bool {
+	for _, m := range dataMarkers {
+		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // migrateLegacyLogIfPresent renames a legacy root-level log file into the

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 )
@@ -19,23 +21,36 @@ import (
 type ui struct {
 	mu             sync.Mutex
 	enabled        bool
-	statusRows     int // height of the fixed pane including the separator row
+	statusRows     int // height of the fixed pane
 	cols, rows     int
-	lastStatusLine string // for redraw idempotence
+	lastStatusHash string // dedupes redundant redraws
 }
 
-const (
-	statusPaneRows = 3 // 2 raw status rows + 1 separator
-)
+// statusPaneRows: 4 rows = top border + stats row A + stats row B + bottom border.
+const statusPaneRows = 4
 
-// ANSI control sequences. DECSTBM (`CSI top;bottom r`) sets the scroll
-// region; DECSC / DECRC save and restore the cursor across status redraws.
+// ANSI control + colour palette. Building strings from these constants
+// keeps the renderer readable without a giant string-soup escape.
 const (
 	ansiClearScreen   = "\x1b[2J"
 	ansiResetScroll   = "\x1b[r"
 	ansiSaveCursor    = "\x1b7"
 	ansiRestoreCursor = "\x1b8"
 	ansiClearLine     = "\x1b[2K"
+	ansiReset         = "\x1b[0m"
+	ansiBold          = "\x1b[1m"
+	ansiDim           = "\x1b[2m"
+	ansiCyan          = "\x1b[36m"
+	ansiBrightCyan    = "\x1b[96m"
+	ansiYellow        = "\x1b[33m"
+	ansiBrightYellow  = "\x1b[93m"
+	ansiGreen         = "\x1b[32m"
+	ansiBrightGreen   = "\x1b[92m"
+	ansiRed           = "\x1b[31m"
+	ansiBrightRed     = "\x1b[91m"
+	ansiMagenta       = "\x1b[35m"
+	ansiBrightMagenta = "\x1b[95m"
+	ansiBgRed         = "\x1b[41m"
 )
 
 func newUI() *ui {
@@ -64,16 +79,14 @@ func (u *ui) Init() {
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	// Clear, set scroll region [statusRows+1 .. bottom], home cursor below pane.
 	fmt.Print(ansiClearScreen)
 	fmt.Printf("\x1b[%d;%dr", u.statusRows+1, u.rows)
 	fmt.Printf("\x1b[%d;1H", u.statusRows+1)
-	// Pre-draw an empty pane so the separator line is visible immediately.
-	u.drawPaneLocked("")
+	// Draw an empty frame so the user sees the layout immediately.
+	u.drawFrameLocked(emptyFrame(u.cols))
 }
 
 // Restore returns the terminal scroll region to its default before exit.
-// Callers should invoke this from a defer in runClient.
 func (u *ui) Restore() {
 	if u == nil || !u.enabled {
 		return
@@ -83,84 +96,449 @@ func (u *ui) Restore() {
 	fmt.Print(ansiResetScroll)
 }
 
-// PrintTranslation writes a source/translation pair to the scroll region,
-// taking the same mutex as DrawStatus so the cursor doesn't get clobbered
-// by an interleaving status redraw.
+// PrintTranslation writes a source/translation pair with a subtle divider
+// and indented bodies, locked against status redraws.
 func (u *ui) PrintTranslation(text, out string, stamp string) {
-	if u == nil {
+	if u == nil || !u.enabled {
 		fmt.Printf("\n[%s] %s\n%s\n", stamp, text, out)
 		return
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	fmt.Printf("\n[%s] %s\n%s\n", stamp, dimIfTerm(text), out)
+
+	hr := strings.Repeat("─", maxInt(0, u.cols-len(stamp)-6))
+	fmt.Printf("\n%s── %s %s%s\n", ansiDim, stamp, hr, ansiReset)
+	writeIndented(text, ansiDim)
+	fmt.Println()
+	writeIndented(out, "")
 }
 
-// DrawStatus translates the raw status text from NetHack and renders it
-// into the fixed-position pane. Safe to call concurrently.
+// writeIndented prints `body` to stdout, every line prefixed with two
+// spaces, optionally wrapped in an ANSI colour code. Trailing newline
+// is omitted; caller controls separation.
+func writeIndented(body, colour string) {
+	for _, line := range strings.Split(body, "\n") {
+		if colour != "" {
+			fmt.Printf("  %s%s%s\n", colour, line, ansiReset)
+		} else {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+}
+
+// DrawStatus parses the raw two-row status into structured fields and
+// repaints the fixed pane with a coloured box, HP/Pw bars, and condition
+// badges. Safe to call concurrently.
 func (u *ui) DrawStatus(raw string, store *store) {
 	if u == nil || !u.enabled {
 		return
 	}
-	translated := translateStatus(raw, store)
+	frame := renderStatusFrame(parseStatus(raw, store), u.cols)
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if translated == u.lastStatusLine {
+	if frame.hash == u.lastStatusHash {
 		return
 	}
-	u.lastStatusLine = translated
-	u.drawPaneLocked(translated)
+	u.lastStatusHash = frame.hash
+	u.drawFrameLocked(frame)
 }
 
-// drawPaneLocked rewrites rows 1..statusRows. Must be called with u.mu held.
-func (u *ui) drawPaneLocked(translated string) {
+// drawFrameLocked rewrites rows 1..statusRows from a prepared frame.
+// Must be called with u.mu held.
+func (u *ui) drawFrameLocked(f statusFrame) {
 	fmt.Print(ansiSaveCursor)
-	lines := strings.Split(translated, "\n")
-	// First N-1 rows hold the status content (clipped if too tall),
-	// the last row of the pane is a horizontal separator.
-	contentRows := u.statusRows - 1
-	for i := 0; i < contentRows; i++ {
-		fmt.Printf("\x1b[%d;1H%s", i+1, ansiClearLine)
-		if i < len(lines) {
-			fmt.Print(lines[i])
+	for i := 0; i < u.statusRows; i++ {
+		line := ""
+		if i < len(f.lines) {
+			line = f.lines[i]
 		}
+		fmt.Printf("\x1b[%d;1H%s%s", i+1, ansiClearLine, line)
 	}
-	// Separator row.
-	sepWidth := u.cols
-	if sepWidth > 120 {
-		sepWidth = 120
-	}
-	fmt.Printf("\x1b[%d;1H%s%s", u.statusRows, ansiClearLine, strings.Repeat("─", sepWidth))
 	fmt.Print(ansiRestoreCursor)
 }
 
-// dimIfTerm wraps in ANSI dim when stdout is a TTY (always true if we
-// reached here, but the helper keeps the call symmetric with the non-UI
-// path).
-func dimIfTerm(s string) string {
-	return "\x1b[2m" + s + "\x1b[0m"
+// Status parsing ----------------------------------------------------------
+
+// statusFields holds the parsed pieces of NetHack's two-row status bar.
+type statusFields struct {
+	name, title, align       string
+	titleZh                  string // glossary-resolved Chinese title, if any
+	st, dx, co, in, wi, ch   string
+	dlvl, gold, ac, xp, turn string
+	hp, hpMax                int
+	pw, pwMax                int
+	conditions               []string
+	raw                      string
 }
 
-// Status translation -------------------------------------------------------
+var (
+	playerHeaderPattern = regexp.MustCompile(`\[([^\]]+?)\s+the\s+([A-Za-z]+)\s*\]`)
+	alignPattern        = regexp.MustCompile(`\b(Lawful|Neutral|Chaotic)\b`)
+	hpPattern           = regexp.MustCompile(`HP:(\d+)\((\d+)\)`)
+	pwPattern           = regexp.MustCompile(`Pw:(\d+)\((\d+)\)`)
+	goldPattern         = regexp.MustCompile(`\$:(\d+)`)
+	scalarPattern       = regexp.MustCompile(`\b(Dlvl|St|Dx|Co|In|Wi|Ch|AC|Xp|HD|T):(\S+)`)
+)
 
-// statLabels maps the short English stat names that appear in NetHack's
-// status bar to their Chinese counterparts. Labels are always followed by
-// ":" in the source text, which makes the substitution unambiguous.
-var statLabels = map[string]string{
-	"St":   "力量",
-	"Dx":   "敏捷",
-	"Co":   "体格",
-	"In":   "智力",
-	"Wi":   "感知",
-	"Ch":   "魅力",
-	"Dlvl": "楼层",
-	"HP":   "生命",
-	"Pw":   "法力",
-	"AC":   "护甲",
-	"Xp":   "经验",
-	"HD":   "等级",
-	"T":    "回合",
+func parseStatus(raw string, store *store) statusFields {
+	f := statusFields{raw: raw}
+
+	if m := playerHeaderPattern.FindStringSubmatch(raw); len(m) == 3 {
+		f.name = strings.TrimSpace(m[1])
+		f.title = m[2]
+		if store != nil {
+			if hits, _ := store.LookupGlossary(f.title); len(hits) > 0 {
+				for _, h := range hits {
+					if strings.EqualFold(h.En, f.title) {
+						f.titleZh = h.Zh
+						break
+					}
+				}
+			}
+		}
+	}
+	if m := alignPattern.FindStringSubmatch(raw); len(m) == 2 {
+		f.align = m[1]
+	}
+	if m := hpPattern.FindStringSubmatch(raw); len(m) == 3 {
+		f.hp, _ = strconv.Atoi(m[1])
+		f.hpMax, _ = strconv.Atoi(m[2])
+	}
+	if m := pwPattern.FindStringSubmatch(raw); len(m) == 3 {
+		f.pw, _ = strconv.Atoi(m[1])
+		f.pwMax, _ = strconv.Atoi(m[2])
+	}
+	if m := goldPattern.FindStringSubmatch(raw); len(m) == 2 {
+		f.gold = m[1]
+	}
+	for _, m := range scalarPattern.FindAllStringSubmatch(raw, -1) {
+		switch m[1] {
+		case "St":
+			f.st = m[2]
+		case "Dx":
+			f.dx = m[2]
+		case "Co":
+			f.co = m[2]
+		case "In":
+			f.in = m[2]
+		case "Wi":
+			f.wi = m[2]
+		case "Ch":
+			f.ch = m[2]
+		case "Dlvl":
+			f.dlvl = m[2]
+		case "AC":
+			f.ac = m[2]
+		case "Xp", "HD":
+			f.xp = m[2]
+		case "T":
+			f.turn = m[2]
+		}
+	}
+	// Iterate the sorted list (not the map) so condition order is stable
+	// across runs — keeps the dedupe hash from churning on map ordering.
+	for _, en := range conditionsOrdered {
+		if conditionPatterns[en].MatchString(raw) {
+			f.conditions = append(f.conditions, en)
+		}
+	}
+	return f
 }
+
+// conditionsOrdered / conditionPatterns are derived once at startup from
+// statusConditions so parseStatus doesn't recompile regexes on every
+// status event.
+var (
+	conditionsOrdered = func() []string {
+		out := make([]string, 0, len(statusConditions))
+		for k := range statusConditions {
+			out = append(out, k)
+		}
+		// Lexicographic sort: deterministic, no semantic meaning needed.
+		for i := 1; i < len(out); i++ {
+			for j := i; j > 0 && out[j-1] > out[j]; j-- {
+				out[j-1], out[j] = out[j], out[j-1]
+			}
+		}
+		return out
+	}()
+	conditionPatterns = func() map[string]*regexp.Regexp {
+		m := make(map[string]*regexp.Regexp, len(statusConditions))
+		for k := range statusConditions {
+			m[k] = regexp.MustCompile(`\b` + regexp.QuoteMeta(k) + `\b`)
+		}
+		return m
+	}()
+)
+
+// Status rendering --------------------------------------------------------
+
+type statusFrame struct {
+	lines []string // raw rendered rows including ANSI escapes
+	hash  string   // colour-free version used for dedupe
+}
+
+func emptyFrame(cols int) statusFrame {
+	width := paneWidth(cols)
+	return statusFrame{
+		lines: []string{
+			topBorder(width, ""),
+			sideBorder(width, ""),
+			sideBorder(width, ""),
+			bottomBorder(width),
+		},
+		hash: "empty",
+	}
+}
+
+// renderStatusFrame produces a 4-row coloured pane:
+//
+//	┌─ Bulesky29 · 穴居人 (Troglodyte) · 守序 · T 129 ─────────────┐
+//	│ HP █████████░ 23/23   Pw █░░░░░░░░ 5/5   AC 8  Xp 2  楼层 1 │
+//	│ St 18/03  Dx 13  Co 17  In 7  Wi 10  Ch 7   $ 0   [饥饿]    │
+//	└──────────────────────────────────────────────────────────────┘
+func renderStatusFrame(f statusFields, cols int) statusFrame {
+	width := paneWidth(cols)
+	header := buildHeader(f)
+	row1 := buildVitalsRow(f)
+	row2 := buildStatsRow(f)
+	lines := []string{
+		topBorder(width, header),
+		sideBorder(width, row1),
+		sideBorder(width, row2),
+		bottomBorder(width),
+	}
+	// Hash is a colour-stripped version of the visible content so we
+	// don't redraw when only the (already-painted) ANSI escapes change.
+	var h strings.Builder
+	for _, l := range lines {
+		h.WriteString(stripANSI(l))
+		h.WriteByte('\n')
+	}
+	return statusFrame{lines: lines, hash: h.String()}
+}
+
+func paneWidth(cols int) int {
+	if cols > 110 {
+		return 110
+	}
+	if cols < 60 {
+		return 60
+	}
+	return cols
+}
+
+// buildHeader → "Bulesky29 · 穴居人 (Troglodyte) · 守序 · T 129"
+func buildHeader(f statusFields) string {
+	var parts []string
+	if f.name != "" {
+		parts = append(parts, ansiBold+ansiBrightCyan+f.name+ansiReset)
+	}
+	if f.title != "" {
+		titleStr := f.title
+		if f.titleZh != "" {
+			titleStr = fmt.Sprintf("%s%s%s (%s%s%s)", ansiCyan, f.titleZh, ansiReset, ansiDim, f.title, ansiReset)
+		} else {
+			titleStr = ansiCyan + f.title + ansiReset
+		}
+		parts = append(parts, titleStr)
+	}
+	if f.align != "" {
+		parts = append(parts, colourAlign(f.align))
+	}
+	if f.turn != "" {
+		parts = append(parts, ansiDim+"T "+f.turn+ansiReset)
+	}
+	return strings.Join(parts, ansiDim+" · "+ansiReset)
+}
+
+// buildVitalsRow → HP bar, Pw bar, AC, Xp, Dlvl, gold.
+func buildVitalsRow(f statusFields) string {
+	var parts []string
+	if f.hpMax > 0 {
+		parts = append(parts, fmt.Sprintf("%sHP%s %s %s%d/%d%s",
+			ansiDim, ansiReset,
+			renderBar(f.hp, f.hpMax, 10, hpPalette(f.hp, f.hpMax)),
+			hpPalette(f.hp, f.hpMax), f.hp, f.hpMax, ansiReset))
+	}
+	if f.pwMax > 0 {
+		parts = append(parts, fmt.Sprintf("%sPw%s %s %s%d/%d%s",
+			ansiDim, ansiReset,
+			renderBar(f.pw, f.pwMax, 8, ansiBrightMagenta),
+			ansiMagenta, f.pw, f.pwMax, ansiReset))
+	}
+	if f.ac != "" {
+		parts = append(parts, fmt.Sprintf("%sAC%s %s%s%s", ansiDim, ansiReset, ansiBold, f.ac, ansiReset))
+	}
+	if f.xp != "" {
+		parts = append(parts, fmt.Sprintf("%sXp%s %s", ansiDim, ansiReset, f.xp))
+	}
+	if f.dlvl != "" {
+		parts = append(parts, fmt.Sprintf("%s楼层%s %s%s%s", ansiDim, ansiReset, ansiBold, f.dlvl, ansiReset))
+	}
+	if f.gold != "" {
+		parts = append(parts, fmt.Sprintf("%s$%s %s%s%s", ansiYellow, ansiReset, ansiBrightYellow, f.gold, ansiReset))
+	}
+	return strings.Join(parts, "   ")
+}
+
+// buildStatsRow → six attribute scalars + condition badges.
+func buildStatsRow(f statusFields) string {
+	var parts []string
+	add := func(label, val string) {
+		if val == "" {
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%s%s%s %s", ansiDim, label, ansiReset, val))
+	}
+	add("St", f.st)
+	add("Dx", f.dx)
+	add("Co", f.co)
+	add("In", f.in)
+	add("Wi", f.wi)
+	add("Ch", f.ch)
+
+	row := strings.Join(parts, "  ")
+	if len(f.conditions) > 0 {
+		var badges []string
+		for _, c := range f.conditions {
+			zh := statusConditions[c]
+			if zh == "" {
+				zh = c
+			}
+			badges = append(badges, fmt.Sprintf("%s%s %s %s", ansiBgRed, ansiBold, zh, ansiReset))
+		}
+		row += "   " + strings.Join(badges, " ")
+	}
+	return row
+}
+
+// renderBar produces a unicode-block bar of `width` cells, coloured.
+func renderBar(cur, max, width int, colour string) string {
+	if max <= 0 {
+		return strings.Repeat("░", width)
+	}
+	if cur < 0 {
+		cur = 0
+	}
+	if cur > max {
+		cur = max
+	}
+	filled := cur * width / max
+	if cur > 0 && filled == 0 {
+		filled = 1 // never show a fully-empty bar when HP > 0
+	}
+	return fmt.Sprintf("%s%s%s%s%s", colour, strings.Repeat("█", filled),
+		ansiDim, strings.Repeat("░", width-filled), ansiReset)
+}
+
+// hpPalette picks a colour based on hp / hpMax ratio.
+func hpPalette(hp, max int) string {
+	if max <= 0 {
+		return ansiGreen
+	}
+	ratio := float64(hp) / float64(max)
+	switch {
+	case ratio > 0.67:
+		return ansiBrightGreen
+	case ratio > 0.34:
+		return ansiBrightYellow
+	default:
+		return ansiBrightRed
+	}
+}
+
+func colourAlign(a string) string {
+	zh := alignmentLabels[a]
+	col := ansiYellow
+	switch a {
+	case "Lawful":
+		col = ansiBrightCyan
+	case "Neutral":
+		col = ansiYellow
+	case "Chaotic":
+		col = ansiBrightRed
+	}
+	if zh != "" {
+		return fmt.Sprintf("%s%s%s", col, zh, ansiReset)
+	}
+	return fmt.Sprintf("%s%s%s", col, a, ansiReset)
+}
+
+// Box-drawing helpers -----------------------------------------------------
+
+func topBorder(width int, header string) string {
+	headerDisplay := visibleWidth(header)
+	leftRule := 2
+	rightRule := width - 2 - leftRule - headerDisplay - 2 // two spaces around header
+	if rightRule < 1 {
+		rightRule = 1
+	}
+	if header == "" {
+		return fmt.Sprintf("%s┌%s┐%s", ansiDim, strings.Repeat("─", width-2), ansiReset)
+	}
+	return fmt.Sprintf("%s┌%s %s %s%s┐%s",
+		ansiDim,
+		strings.Repeat("─", leftRule),
+		header,
+		ansiDim, strings.Repeat("─", rightRule),
+		ansiReset,
+	)
+}
+
+func sideBorder(width int, content string) string {
+	inner := width - 4 // borders + one space padding each side
+	pad := inner - visibleWidth(content)
+	if pad < 0 {
+		pad = 0
+	}
+	return fmt.Sprintf("%s│%s %s%s %s│%s",
+		ansiDim, ansiReset, content, strings.Repeat(" ", pad), ansiDim, ansiReset)
+}
+
+func bottomBorder(width int) string {
+	return fmt.Sprintf("%s└%s┘%s", ansiDim, strings.Repeat("─", width-2), ansiReset)
+}
+
+// visibleWidth strips ANSI escapes and counts display cells, treating each
+// CJK rune as 2 columns (NetHack's status bar is ASCII; the CJK widths
+// matter for the translated labels we inject).
+func visibleWidth(s string) int {
+	clean := stripANSI(s)
+	w := 0
+	for _, r := range clean {
+		if r >= 0x1100 && (r <= 0x115f ||
+			(r >= 0x2e80 && r <= 0xa4cf) || // CJK
+			(r >= 0xac00 && r <= 0xd7a3) || // Hangul
+			(r >= 0xf900 && r <= 0xfaff) || // CJK Compat
+			(r >= 0xfe30 && r <= 0xfe4f) || // CJK Compat Forms
+			(r >= 0xff00 && r <= 0xff60) || // Fullwidth Forms
+			(r >= 0xffe0 && r <= 0xffe6)) {
+			w += 2
+		} else if r >= 0x20 {
+			w += 1
+		}
+	}
+	return w
+}
+
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]|\x1b[78]`)
+
+func stripANSI(s string) string {
+	return ansiEscapeRe.ReplaceAllString(s, "")
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// ensure utf8 is used so the import isn't dropped if visibleWidth changes
+var _ = utf8.RuneLen
+
+// Static label maps -------------------------------------------------------
 
 var alignmentLabels = map[string]string{
 	"Lawful":  "守序",
@@ -168,108 +546,24 @@ var alignmentLabels = map[string]string{
 	"Chaotic": "混乱",
 }
 
-// statusConditions translates the per-turn affliction words that NetHack
-// appends to the status line (e.g. "Hungry", "Confused", "Burdened").
+// statusConditions maps NetHack's per-turn affliction tokens to their
+// Chinese badge text. Order doesn't matter (we render in detection order).
 var statusConditions = map[string]string{
 	"Hungry":   "饥饿",
 	"Weak":     "虚弱",
 	"Fainting": "晕厥",
-	"Starving": "饿死边缘",
+	"Starving": "濒死",
 	"Satiated": "过饱",
 	"Confused": "困惑",
 	"Stunned":  "眩晕",
 	"Hallu":    "幻觉",
 	"Blind":    "失明",
-	"Burdened": "负担",
-	"Stressed": "压重",
-	"Strained": "过载",
+	"Burdened": "负重",
+	"Stressed": "负担重",
+	"Strained": "极限",
 	"FoodPois": "食物中毒",
 	"Ill":      "患病",
 	"Slimed":   "黏液化",
 	"Held":     "被抓",
 	"Greasy":   "油腻",
-}
-
-// statLabelOrdered preserves longest-prefix-first ordering so "Dlvl:" is
-// substituted before "Dx:" / "D:" — Go map iteration is randomized, and
-// the longest label must win.
-var statLabelOrdered = sortedKeysByLength(statLabels)
-
-// labelPattern is precompiled per label so word-boundary substitution stays
-// safe (we don't want "In:" to nibble into "Inside:" should a future status
-// row format change).
-var labelPatterns = func() map[string]*regexp.Regexp {
-	m := make(map[string]*regexp.Regexp, len(statLabels))
-	for en := range statLabels {
-		m[en] = regexp.MustCompile(`\b` + regexp.QuoteMeta(en) + `:`)
-	}
-	return m
-}()
-
-// translateStatus rewrites the raw two-row status with Chinese labels and
-// glossary-resolved class titles, leaving values and proper names intact.
-func translateStatus(raw string, store *store) string {
-	var out []string
-	for _, line := range strings.Split(raw, "\n") {
-		out = append(out, translateStatusLine(line, store))
-	}
-	return strings.Join(out, "\n")
-}
-
-func translateStatusLine(line string, store *store) string {
-	// Translate "[<name> the <title>     ]" — class titles benefit from
-	// glossary lookup so the user's curated rendering takes precedence.
-	line = playerHeaderPattern.ReplaceAllStringFunc(line, func(match string) string {
-		groups := playerHeaderPattern.FindStringSubmatch(match)
-		if len(groups) != 3 {
-			return match
-		}
-		name, title := groups[1], groups[2]
-		titleZh := title
-		if store != nil {
-			if hits, _ := store.LookupGlossary(title); len(hits) > 0 {
-				for _, h := range hits {
-					if strings.EqualFold(h.En, title) {
-						titleZh = h.Zh
-						break
-					}
-				}
-			}
-		}
-		if titleZh == title {
-			return fmt.Sprintf("[%s · %s]", name, title)
-		}
-		return fmt.Sprintf("[%s · %s (%s)]", name, titleZh, title)
-	})
-
-	// Replace label tokens in longest-first order so "Dlvl:" beats "D:".
-	for _, en := range statLabelOrdered {
-		zh := statLabels[en]
-		line = labelPatterns[en].ReplaceAllString(line, zh+":")
-	}
-	for en, zh := range alignmentLabels {
-		line = strings.Replace(line, en, zh, 1)
-	}
-	for en, zh := range statusConditions {
-		line = strings.Replace(line, en, zh, 1)
-	}
-	return line
-}
-
-// playerHeaderPattern matches "[<name> the <Title>     ]" with optional
-// trailing whitespace inside the brackets.
-var playerHeaderPattern = regexp.MustCompile(`\[([^\]]+?)\s+the\s+([A-Za-z]+)\s*\]`)
-
-func sortedKeysByLength(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	// Simple insertion sort by descending length — small N.
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && len(keys[j-1]) < len(keys[j]); j-- {
-			keys[j-1], keys[j] = keys[j], keys[j-1]
-		}
-	}
-	return keys
 }

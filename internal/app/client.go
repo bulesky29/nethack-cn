@@ -271,11 +271,6 @@ var (
 	}
 
 	trivialPatterns = []*regexp.Regexp{
-		// Only filter "You see here N gold pieces." — bare gold counts
-		// are clutter. Real items ("You see here a crude dagger.",
-		// "...a scroll labeled VENZAR BORGAVVE.") are useful and must
-		// be translated.
-		regexp.MustCompile(`^You see here \d+ gold pieces?\.?$`),
 		regexp.MustCompile(`^You move\b`),
 		regexp.MustCompile(`^(North|South|East|West|Northeast|Northwest|Southeast|Southwest)\.?$`),
 		regexp.MustCompile(`^Pick up what\?`),
@@ -416,11 +411,37 @@ ABSOLUTE RULES — violating any of these is a failure:
 
 TRANSLATION RULES:
 1. Drop UI noise: "--More--", "(end)", "(p of q)", trailing y/n prompts.
-2. Preserve item names, monster names, place names, and numeric stats verbatim — do not Chinese-ify them when the player needs them to identify the entity (e.g. keep "kobold zombie", "scroll of identify", "+1 mace", "Slasher"). It's fine to follow the English token with a parenthesized Chinese gloss the first time it appears.
-3. For curses, cursed items, traps, poison, paralysis, petrification, instakill effects, or other lethal threats, lead the affected line with "[警告] ".
-4. Multi-line popups (creation stories, identify menus, inventory lists, shop bills, dump screens) → preserve paragraph structure for prose; use "- " bullets for itemized lists. If the input contains stray dungeon-map characters (|, -, .) bleeding through from the screen behind the menu, ignore them.
-5. For [ynaq]-style or "Direction?" prompts, translate the question but keep the bracketed key letters / hotkeys unchanged so the player can still type the right key.
-6. For terse farlook output like "kobold" or "lit corridor", just translate the noun phrase directly (e.g. "狗头人", "明亮的走廊"). No need to expand into a sentence.`
+2. Names: **transliterate proper nouns of named entities into Simplified Chinese** so the translation reads naturally. Player names, pet names, NPC names, named artifacts, and god names → use a phonetic Chinese rendering, optionally followed by the English in parens the first time it appears in a popup. Examples:
+   - "Bulesky29" → "布尔斯基29"
+   - "Slasher" → "斯莱舍"
+   - "Marduk the Creator" → "马尔杜克"
+   - "Excalibur" → "埃克斯卡利伯（Excalibur）"
+   Glossary entries you've been given override your own transliteration — if a name appears in the GLOSSARY block, use the Chinese rendering there verbatim.
+3. Categorical / generic names — monster types ("kobold", "grid bug"), item types ("scroll of identify", "leather armor", "fizzy potion"), terrain types ("altar", "fountain") — translate to Chinese: 狗头人, 网格虫, 鉴定卷轴, 皮甲, 起泡药水, 祭坛, 喷泉. Keep numeric stats untouched (e.g. "+1 mace" → "+1 锤"). Random unidentified scroll / potion labels ("VENZAR BORGAVVE") stay verbatim — they're meant to be opaque to the player.
+4. For curses, cursed items, traps, poison, paralysis, petrification, instakill effects, or other lethal threats, lead the affected line with "[警告] ".
+5. Multi-line popups (creation stories, identify menus, inventory lists, shop bills, dump screens) → preserve paragraph structure for prose; use "- " bullets for itemized lists. If the input contains stray dungeon-map characters (|, -, .) bleeding through from the screen behind the menu, ignore them.
+6. For [ynaq]-style or "Direction?" prompts, translate the question but keep the bracketed key letters / hotkeys unchanged so the player can still type the right key.
+7. For terse farlook output like "kobold" or "lit corridor", just translate the noun phrase directly (e.g. "狗头人", "明亮的走廊"). No need to expand into a sentence.`
+
+// promptVersion bumps whenever the system prompt changes meaningfully
+// (rule additions, wording shifts that affect output style). It's
+// appended to the cache's model tag so entries from older prompts
+// stop matching after an upgrade — a re-translate produces output
+// consistent with the new rules.
+//
+// Current bumps:
+//
+//	v1 — original prompt, items kept verbatim in English.
+//	v2 — names transliterate (Bulesky29 → 布尔斯基29, Slasher → 斯莱舍);
+//	     categorical names (kobold / scroll of identify) translated.
+const promptVersion = "v2"
+
+// modelTag combines model slug and prompt version for the cache key.
+// Anything changing the model OR the prompt produces a fresh tag and
+// auto-invalidates stale entries.
+func (t *translator) modelTag() string {
+	return t.cfg.Model + ":" + promptVersion
+}
 
 // Display kinds for translated output — selects which UI method gets
 // called when the translation is ready.
@@ -440,7 +461,7 @@ func popupDisplayKind(role string) string {
 }
 
 func (t *translator) translate(ctx context.Context, text, kind string) {
-	if cached, ok := t.store.GetTranslation(text); ok {
+	if cached, ok := t.store.GetTranslation(text, t.modelTag()); ok {
 		t.dbg.Translate("cache hit: input_bytes=%d kind=%s", len(text), kind)
 		t.display(text, cached, kind)
 		return
@@ -543,7 +564,7 @@ func (t *translator) translate(ctx context.Context, text, kind string) {
 		return
 	}
 
-	if err := t.store.PutTranslation(text, out, t.cfg.Model); err != nil {
+	if err := t.store.PutTranslation(text, out, t.modelTag()); err != nil {
 		t.dbg.Translate("req #%d cache write failed: %v", id, err)
 	}
 	t.display(text, out, kind)

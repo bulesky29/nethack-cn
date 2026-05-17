@@ -181,15 +181,22 @@ func (s *store) Close() error {
 	return s.db.Close()
 }
 
-// GetTranslation returns the cached Chinese output for an input, plus a
-// bool indicating whether the cache had it. It also increments a hit
-// counter so we can later inspect which entries are paying their keep.
-func (s *store) GetTranslation(input string) (string, bool) {
+// GetTranslation returns the cached Chinese output for an input under
+// the given modelTag (typically "<model>:<promptVersion>"). When the
+// translator's prompt or model changes, the tag changes too and old
+// entries naturally cache-miss — so a system-prompt rewrite doesn't
+// keep serving stale Chinese.
+//
+// Increments a hit counter for the row.
+func (s *store) GetTranslation(input, modelTag string) (string, bool) {
 	if s == nil {
 		return "", false
 	}
 	var out string
-	err := s.db.QueryRow(`SELECT output FROM translations WHERE input = ?`, input).Scan(&out)
+	err := s.db.QueryRow(
+		`SELECT output FROM translations WHERE input = ? AND model = ?`,
+		input, modelTag,
+	).Scan(&out)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false
 	}
@@ -197,14 +204,17 @@ func (s *store) GetTranslation(input string) (string, bool) {
 		return "", false
 	}
 	// Fire-and-forget hit increment; failure here doesn't affect correctness.
-	_, _ = s.db.Exec(`UPDATE translations SET hits = hits + 1 WHERE input = ?`, input)
+	_, _ = s.db.Exec(
+		`UPDATE translations SET hits = hits + 1 WHERE input = ? AND model = ?`,
+		input, modelTag,
+	)
 	return out, true
 }
 
-// PutTranslation stores or overwrites a translation. We use REPLACE so a
-// later run with a different model can update the cached rendering — the
-// most recent translation wins.
-func (s *store) PutTranslation(input, output, model string) error {
+// PutTranslation stores or overwrites a translation under the given
+// modelTag. INSERT OR REPLACE on the input primary key — a re-translate
+// under a new tag transparently supersedes the old entry.
+func (s *store) PutTranslation(input, output, modelTag string) error {
 	if s == nil {
 		return nil
 	}
@@ -212,8 +222,8 @@ func (s *store) PutTranslation(input, output, model string) error {
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO translations (input, output, model, created, hits)
-		 VALUES (?, ?, ?, ?, COALESCE((SELECT hits FROM translations WHERE input = ?), 0))`,
-		input, output, model, time.Now().Unix(), input,
+		 VALUES (?, ?, ?, ?, COALESCE((SELECT hits FROM translations WHERE input = ? AND model = ?), 0))`,
+		input, output, modelTag, time.Now().Unix(), input, modelTag,
 	)
 	return err
 }

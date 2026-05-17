@@ -75,49 +75,41 @@ type entry struct {
 }
 
 // heroEntries — the eight things a new player must internalize. Visually
-// emphasized at the top of page 1.
+// emphasized at the top of page 1. Descriptions include the English
+// etymology in parentheses so the single-letter keys are easier to recall.
 var heroEntries = []entry{
-	{"s × n", "原地多按几次：搜隐藏门 / 陷阱。走廊里没事多按"},
-	{";", "远观：指地图任意位置查它是什么。走之前先看"},
-	{"#pray", "向神祈祷。HP 危急时新角色能保底救一次"},
-	{"i", "查背包"},
-	{",", "捡脚下东西"},
-	{"r  q  e", "读卷轴 / 喝药水 / 吃东西"},
+	{"s × n", "搜隐藏门 / 陷阱 (search)：原地多按几次，走廊里没事多按"},
+	{";", "远观 (farlook)：指地图任意位置查它是什么。走之前先看"},
+	{"#pray", "向神祈祷 (pray)。HP 危急时新角色能保底救一次"},
+	{"i", "查背包 (inventory)"},
+	{",", "捡脚下东西 (pickup)"},
+	{"r  q  e", "读卷轴 (read) / 喝药水 (quaff) / 吃东西 (eat)"},
 	{"<  >", "上 / 下楼梯（站在 < 或 > 上）"},
-	{"S", "存档退出，下次启动继续"},
-}
-
-var movementEntries = []entry{
-	{"h j k l", "西 / 南 / 北 / 东（vi 风格）"},
-	{"y u b n", "对角线：西北 / 东北 / 西南 / 东南"},
-	{"H J K L 等", "大写方向键：一直走到撞墙或异常"},
-	{"g + 方向", "走到当前房间的边缘"},
-	{"G + 方向", "一路走到下一个有趣点（楼梯、岔路、物品）"},
-	{"_", "Travel：在地图上点目标位置自动寻路"},
+	{"S", "存档退出 (save)，下次启动继续"},
 }
 
 var combatEntries = []entry{
-	{"F + 方向", "强制攻击该方向；能打透明 / 隐形怪"},
-	{"t", "投掷物品（先选物品，再选方向）"},
-	{"z", "用法杖（先选法杖，再选方向）"},
-	{"Z", "施法（先在 + 菜单学会咒语）"},
-	{"^d", "踢"},
+	{"F + 方向", "强行攻击该方向 (fight)；打隐形怪"},
+	{"t", "投掷物品 (throw)：选物 + 方向"},
+	{"z", "使用法杖 (zap)：选杖 + 方向"},
+	{"Z", "施法 (cast)：咒语在 + 菜单学"},
+	{"^d", "踢 (kick)"},
 }
 
 var gearEntries = []entry{
-	{"W / T", "穿 / 脱盔甲"},
-	{"w", "装备武器；按 - 切回徒手"},
-	{"P / R", "戴 / 摘戒指、护符"},
-	{"d / D", "丢一个 / 按类型批量丢"},
-	{"a", "使用工具（绳钩、口哨、信号灯等）"},
+	{"W / T", "穿 / 脱盔甲 (wear / take off)"},
+	{"w", "装备武器 (wield)；- 切回徒手"},
+	{"P / R", "戴 / 摘戒指护符 (put on / remove)"},
+	{"d / D", "丢一个 / 按类型批量丢 (drop)"},
+	{"a", "使用工具 (apply)：绳钩、口哨等"},
 }
 
 var exploreEntries = []entry{
-	{"o / c", "开 / 关门"},
-	{":", "看脚下（同 . 但更明确）"},
+	{"o / c", "开 (open) / 关 (close) 门"},
+	{":", "看脚下 (look here)：同 . 但更明确"},
 	{"\\", "已发现物品 / 怪物列表"},
-	{"^x", "查看自己的属性面板"},
-	{"?", "游戏内帮助菜单"},
+	{"^x", "查看自己的属性面板 (extended status)"},
+	{"?", "游戏内帮助菜单 (help)"},
 }
 
 var extEntries = []entry{
@@ -250,8 +242,8 @@ func generateManual(path, fontPath string) error {
 
 	addTitle(m)
 	addHeroSection(m, "第一天必学", heroEntries)
-	addTwoColSection(m, "移动", movementEntries, "战斗", combatEntries)
-	addTwoColSection(m, "装备 / 物品", gearEntries, "探索 / 互动", exploreEntries)
+	addTwoColSection(m, "战斗", combatEntries, "装备 / 物品", gearEntries)
+	addSection(m, "探索 / 互动", exploreEntries, bgSection)
 	addSection(m, "进阶 # 命令", extEntries, bgSection)
 	addSection(m, "状态条解读 (nh-helper 客户端顶部已实时翻译)", statusFieldEntries, bgSection)
 	addSymbolGrid(m, "地图符号速查", symbolEntries)

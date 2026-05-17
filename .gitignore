@@ -1,5 +1,7 @@
-# Build artifact
+# Build artifacts
 /nh-helper
+/nh-helper.exe
+/bin/
 
 # Local secrets — never commit
 /config.json

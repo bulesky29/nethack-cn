@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bufio"
@@ -34,7 +34,7 @@ const (
 //
 //	roleText: streaming MSG batches + narrative POPUPs
 //	roleMenu: STATUS bar + menu/inventory POPUPs (status pane visible)
-func runClient(debug bool, role string) error {
+func RunClient(debug bool, role string) error {
 	dbg, err := openDebugLog(debug, "client-"+role)
 	if err != nil {
 		return fmt.Errorf("open debug log: %w", err)

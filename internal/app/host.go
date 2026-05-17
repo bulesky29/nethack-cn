@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -7,13 +7,11 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/hinshun/vt10x"
@@ -24,7 +22,7 @@ import (
 // runHost wires the local terminal to a remote nethack@alt.org SSH session
 // while streaming the top two rows of the screen to a sibling client process
 // over a local TCP socket.
-func runHost(debug bool) error {
+func RunHost(debug bool) error {
 	dbg, err := openDebugLog(debug, "host")
 	if err != nil {
 		return fmt.Errorf("open debug log: %w", err)
@@ -186,7 +184,9 @@ func runSession(cfg *Config, r *router, dbg *debugLog) error {
 	defer cancel()
 
 	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGWINCH)
+	notifySignals := append([]os.Signal{}, closeSignals...)
+	notifySignals = append(notifySignals, resizeSignals...)
+	signal.Notify(sigs, notifySignals...)
 	defer signal.Stop(sigs)
 
 	go func() {
@@ -195,7 +195,7 @@ func runSession(cfg *Config, r *router, dbg *debugLog) error {
 			case <-ctx.Done():
 				return
 			case sig := <-sigs:
-				if sig == syscall.SIGWINCH {
+				if isResizeSignal(sig) {
 					if c, r, err := term.GetSize(stdoutFd); err == nil {
 						_ = session.WindowChange(r, c)
 					}
@@ -527,29 +527,23 @@ func readRow(vt vt10x.Terminal, y, cols int) string {
 	return b.String()
 }
 
-// spawnClientTerminal opens a new Terminal.app window running this binary in
-// client mode with the given role, so each role gets its own window.
-func spawnClientTerminal(debug bool, role string) error {
+// spawnClientTerminal is implemented per-OS in terminal_{darwin,linux,windows}.go.
+// Each variant opens a new terminal window running this binary in client
+// mode with the given role.
+
+// clientExeAndArgs is a helper shared by every platform spawner — resolves
+// the running binary's absolute path and builds the client-mode argv.
+func clientExeAndArgs(debug bool, role string) (string, []string, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-
-	// Quote the path for AppleScript and the shell layer it invokes.
-	asEscapedPath := strings.ReplaceAll(exe, `\`, `\\`)
-	asEscapedPath = strings.ReplaceAll(asEscapedPath, `"`, `\"`)
-	debugFlag := ""
+	args := []string{"-mode", "client", "-role", role}
 	if debug {
-		debugFlag = " -debug"
+		args = append(args, "-debug")
 	}
-	shellCommand := fmt.Sprintf(`\"%s\" -mode client -role %s%s`, asEscapedPath, role, debugFlag)
-	script := fmt.Sprintf(`tell application "Terminal" to do script "%s"`, shellCommand)
-
-	cmd := exec.Command("osascript", "-e", script)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Start()
+	return exe, args, nil
 }

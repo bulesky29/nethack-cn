@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -22,12 +22,31 @@ import (
 // Delete and re-launch to regenerate.
 const manualFileName = "nh-helper-手册.pdf"
 
-// cjkFontCandidates lists TTF files on macOS that ship with full CJK
-// coverage. Arial Unicode.ttf is on every Mac since 10.5 and contains the
-// full CJK Unified Ideographs block.
+// cjkFontCandidates lists font files we probe for full CJK coverage.
+// Probed in order; first hit wins. We prefer plain TTF (maroto's gofpdf
+// backend wants pure TTF, not TTC) and fall back to TTC only as a long
+// shot — see .agent/roadmap.md for the TTC extraction follow-up.
+//
+//	macOS:   Arial Unicode.ttf ships on every Mac since 10.5.
+//	Linux:   distros usually have WenQuanYi or Noto Sans CJK installed.
+//	Windows: Microsoft YaHei and SimSun ship with Windows since Vista.
 var cjkFontCandidates = []string{
+	// macOS
 	"/Library/Fonts/Arial Unicode.ttf",
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+	// Linux
+	"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+	"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+	"/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+	"/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+	"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+	"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+	"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+	// Windows
+	`C:\Windows\Fonts\msyh.ttc`,
+	`C:\Windows\Fonts\msyh.ttf`,
+	`C:\Windows\Fonts\simsun.ttc`,
+	`C:\Windows\Fonts\simhei.ttf`,
 }
 
 const fontFamily = "cn"
@@ -171,7 +190,7 @@ var nhHelperHints = []entry{
 
 // Generation -----------------------------------------------------------
 
-func ensureManual() (string, bool, error) {
+func EnsureManual() (string, bool, error) {
 	dir, err := binaryDir()
 	if err != nil {
 		return "", false, err

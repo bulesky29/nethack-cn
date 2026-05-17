@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bufio"
@@ -10,11 +10,27 @@ import (
 	"sync"
 )
 
+// Network endpoints. Both host (listener) and client (dialer) reference
+// these — they live in the routing file because routing is the shared
+// network surface.
+const (
+	localAddr = "127.0.0.1:9999"
+	sshHost   = "alt.org:22"
+)
+
 // Client roles. Each running client identifies itself on connect with
 // "ROLE: <role>\n" so the host knows where to route which events.
+// Exported so cmd/nh-helper can validate the -role flag without
+// hard-coding the strings.
 const (
-	roleText = "text" // streaming narrative / action translations
-	roleMenu = "menu" // fixed status bar + menu / inventory popups
+	RoleText = "text" // streaming narrative / action translations
+	RoleMenu = "menu" // fixed status bar + menu / inventory popups
+)
+
+// Internal aliases keep existing intra-package call sites readable.
+const (
+	roleText = RoleText
+	roleMenu = RoleMenu
 )
 
 // roleHeader is the literal first line every client sends after the TCP

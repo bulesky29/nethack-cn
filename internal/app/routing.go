@@ -130,12 +130,29 @@ var menuLinePattern = regexp.MustCompile(`^[a-zA-Z]\s*-\s`)
 // text stream because they're too short to be confidently classified.
 var farlookCardPattern = regexp.MustCompile(`^[A-Za-z<>#@$\\]\s{4,}\S`)
 
+// pickupPattern catches single-item pickup notifications — NetHack
+// emits "<inventory-letter> - <item description>." on the message line
+// each time you auto-pick or single-pick a thing. Examples:
+//
+//	$ - 2 gold pieces.
+//	f - a +0 small shield.
+//	a - a blessed +1 quarterstaff.
+//
+// Inventory letters are a-zA-Z plus the special `$` for gold and `#`
+// for the Bag-of-Holding overflow letter. These are inventory state
+// updates — the player wants to glance at the menu window to see
+// what just landed in their pack.
+var pickupPattern = regexp.MustCompile(`^[a-zA-Z$#]\s+-\s+\S`)
+
 // classifyMessage decides whether a top-row MSG event belongs in the
 // menu window (info cards, reference-y) or the text window (narrative,
 // actions, prompts). Default is text — only confidently-recognized
 // info cards get diverted.
 func classifyMessage(msg string) string {
 	if farlookCardPattern.MatchString(msg) {
+		return roleMenu
+	}
+	if pickupPattern.MatchString(msg) {
 		return roleMenu
 	}
 	if strings.Contains(msg, "[seen:") {

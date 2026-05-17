@@ -4,15 +4,17 @@ BINDIR  := bin
 LDFLAGS := -s -w
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-# All supported OS / arch pairs. Each target writes
-# bin/<BINARY>-<os>-<arch>[.exe].
+# Per-arch build matrix used to produce the release artefacts.
+# darwin-amd64 + darwin-arm64 are fused into a single universal
+# binary via lipo; linux and windows ship amd64 only. Final outputs:
+#   bin/nh-helper-darwin       (universal: amd64 + arm64)
+#   bin/nh-helper-linux        (amd64)
+#   bin/nh-helper-windows.exe  (amd64)
 PLATFORMS := \
 	darwin/amd64 \
 	darwin/arm64 \
 	linux/amd64 \
-	linux/arm64 \
-	windows/amd64 \
-	windows/arm64
+	windows/amd64
 
 .PHONY: build build-all test vet tidy clean release help
 
@@ -24,7 +26,7 @@ build:  ## Build for the host platform → bin/nh-helper(.exe)
 	go build -ldflags "$(LDFLAGS) -X main.version=$(VERSION)" -o $(BINDIR)/$(BINARY)$(if $(filter windows,$(shell go env GOOS)),.exe,) $(PKG)
 	@echo "→ $(BINDIR)/$(BINARY)$(if $(filter windows,$(shell go env GOOS)),.exe,)"
 
-build-all:  ## Cross-compile for darwin / linux / windows × amd64 / arm64
+build-all:  ## Cross-compile release artefacts: darwin (universal), linux, windows
 	@mkdir -p $(BINDIR)
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
@@ -35,7 +37,15 @@ build-all:  ## Cross-compile for darwin / linux / windows × amd64 / arm64
 			go build -ldflags "$(LDFLAGS) -X main.version=$(VERSION)" -o $$out $(PKG) \
 			|| exit 1; \
 	done
-	@echo "✓ all platforms built under $(BINDIR)/"
+	@command -v lipo >/dev/null 2>&1 || { \
+		echo "✗ lipo not found — needed to fuse darwin amd64+arm64 into a universal binary"; exit 1; }
+	@echo "  · fusing darwin amd64+arm64 → $(BINDIR)/$(BINARY)-darwin"
+	@lipo -create -output $(BINDIR)/$(BINARY)-darwin \
+		$(BINDIR)/$(BINARY)-darwin-amd64 $(BINDIR)/$(BINARY)-darwin-arm64
+	@rm -f $(BINDIR)/$(BINARY)-darwin-amd64 $(BINDIR)/$(BINARY)-darwin-arm64
+	@mv $(BINDIR)/$(BINARY)-linux-amd64       $(BINDIR)/$(BINARY)-linux
+	@mv $(BINDIR)/$(BINARY)-windows-amd64.exe $(BINDIR)/$(BINARY)-windows.exe
+	@echo "✓ release artefacts: $(BINARY)-darwin, $(BINARY)-linux, $(BINARY)-windows.exe (under $(BINDIR)/)"
 
 test:  ## Run the test suite
 	go test ./...

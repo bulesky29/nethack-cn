@@ -23,6 +23,16 @@ func TestClassifyMessage(t *testing.T) {
 		{"short label 2", "open door", roleText},
 		{"short label 3", "tame little dog called Slasher", roleText},
 
+		// Single-item pickup notifications — menu window.
+		{"pickup gold", "$ - 2 gold pieces.", roleMenu},
+		{"pickup shield", "f - a +0 small shield.", roleMenu},
+		{"pickup blessed weapon", "a - a blessed +1 quarterstaff.", roleMenu},
+		{"pickup uppercase letter", "A - an uncursed luckstone.", roleMenu},
+		{"pickup bag overflow letter", "# - an empty sack.", roleMenu},
+
+		// "You pick up …" narrative form stays in text.
+		{"pick up narrative", "You pick up 3 gold pieces.", roleText},
+
 		// Long farlook detail cards — menu window.
 		{"glyph card with [seen:]",
 			"d        a kobold (kobold) [seen: normal vision, infravision]",

@@ -383,13 +383,16 @@ func watchScreen(ctx context.Context, vt vt10x.Terminal, r *router, dbg *debugLo
 			}
 			lastPopup = ""
 
-			// Top-row messages are always narrative — route to text.
+			// Top-row messages are usually narrative, but farlook info
+			// cards (e.g. "d        a kobold ... [seen: ...]") belong
+			// in the menu window — classifyMessage picks.
 			if state.topMessage == "" || state.topMessage == lastMsg {
 				continue
 			}
 			lastMsg = state.topMessage
-			dbg.Raw("emit MSG → text: %q", state.topMessage)
-			if err := emitMessage(r, state.topMessage); err != nil {
+			msgRole := classifyMessage(state.topMessage)
+			dbg.Raw("emit MSG → %s: %q", msgRole, state.topMessage)
+			if err := emitMessage(r, msgRole, state.topMessage); err != nil {
 				dbg.Raw("emit MSG failed: %v", err)
 				return
 			}
@@ -491,8 +494,8 @@ func extractTopMessage(lines []string) string {
 	return strings.TrimSpace(combined)
 }
 
-func emitMessage(r *router, msg string) error {
-	return r.Send(roleText, eventMsgPrefix+msg)
+func emitMessage(r *router, role, msg string) error {
+	return r.Send(role, eventMsgPrefix+msg)
 }
 
 func emitPopup(r *router, role, popup string) error {

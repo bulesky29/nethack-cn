@@ -116,6 +116,36 @@ func readRoleHeader(conn net.Conn) (string, error) {
 // between menus so we allow a couple of forms.
 var menuLinePattern = regexp.MustCompile(`^[a-zA-Z]\s*-\s`)
 
+// farlookCardPattern catches single-line top-row messages that are
+// actually farlook detail dumps — they always lead with the entity's
+// map glyph, then 4+ spaces of right-padding, then the descriptive
+// noun phrase. Examples:
+//
+//	d        a dog or other canine (tame little dog called Slasher) [seen: …]
+//	<        a staircase up or a ladder up or a branch staircase up …
+//	#        can be many things (corridor)
+//
+// These belong in the menu window (info cards), not the narrative
+// stream. Bare farlook nouns like "kobold" or "open door" stay in the
+// text stream because they're too short to be confidently classified.
+var farlookCardPattern = regexp.MustCompile(`^[A-Za-z<>#@$\\]\s{4,}\S`)
+
+// classifyMessage decides whether a top-row MSG event belongs in the
+// menu window (info cards, reference-y) or the text window (narrative,
+// actions, prompts). Default is text — only confidently-recognized
+// info cards get diverted.
+func classifyMessage(msg string) string {
+	if farlookCardPattern.MatchString(msg) {
+		return roleMenu
+	}
+	if strings.Contains(msg, "[seen:") {
+		// The "[seen: normal vision, infravision]" tail is a tell-tale
+		// of farlook detail even when the card prefix is missing.
+		return roleMenu
+	}
+	return roleText
+}
+
 // classifyPopup decides whether a captured full-screen popup is a
 // reference-style menu (inventory, identify, item-selection, etc.) or
 // a narrative dump (creation story, role-card, prompt explanation).

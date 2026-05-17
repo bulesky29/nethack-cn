@@ -12,9 +12,13 @@ import (
 	"golang.org/x/term"
 )
 
-// ui owns the client terminal layout. It reserves the top few rows for a
-// fixed-position translated status pane and confines streaming
-// translations to a scroll region below it.
+// ui owns the client terminal layout. Two flavours, picked by role:
+//
+//	menu role: top statusRows fixed for the live status pane, scroll
+//	           region below for menu / popup translations.
+//	text role: alternate screen + clear-and-redraw on every translation,
+//	           showing the most recent textRecentMax cards. No scroll
+//	           history — user asked for "刷屏" (refresh-style).
 //
 // When the client's stdout is not a TTY (piped, redirected) the whole
 // thing becomes a no-op and translations stream normally.
@@ -26,16 +30,35 @@ type ui struct {
 	statusRows     int    // height of the fixed pane when hasStatusPane
 	cols, rows     int
 	lastStatusHash string // dedupes redundant redraws
+
+	// Refresh-mode state (text role).
+	refreshMode bool         // alt-screen + clear-and-redraw on every print
+	recentMax   int          // how many recent items to keep on screen
+	recent      []recentItem // ring of the last N translations
+}
+
+// recentItem is one entry in the refresh-mode rolling buffer.
+type recentItem struct {
+	text, out, stamp string
 }
 
 // statusPaneRows: 4 rows = top border + stats row A + stats row B + bottom border.
 const statusPaneRows = 4
 
+// textRecentMax is the number of past translations kept visible in the
+// text role's refresh window. Chosen so even a long popup translation
+// plus the next two short messages comfortably fit in a default 24-row
+// terminal.
+const textRecentMax = 3
+
 // ANSI control + colour palette. Building strings from these constants
 // keeps the renderer readable without a giant string-soup escape.
 const (
 	ansiClearScreen   = "\x1b[2J"
+	ansiHomeClearDown = "\x1b[H\x1b[J"  // jump home + clear from cursor to end
 	ansiResetScroll   = "\x1b[r"
+	ansiEnterAlt      = "\x1b[?1049h"   // enter alternate screen buffer
+	ansiExitAlt       = "\x1b[?1049l"   // leave alternate screen buffer
 	ansiSaveCursor    = "\x1b7"
 	ansiRestoreCursor = "\x1b8"
 	ansiClearLine     = "\x1b[2K"
@@ -75,19 +98,29 @@ func newUI(role string) *ui {
 		statusRows:    statusPaneRows,
 		cols:          cols,
 		rows:          rows,
+		refreshMode:   role == roleText,
+		recentMax:     textRecentMax,
 	}
 }
 
-// Init reserves the top statusRows lines for the status pane (menu role
-// only) and parks the cursor below them so subsequent normal output flows
-// in the scroll region. Text role gets a full-screen scroll region with
-// no fixed pane.
+// Init sets up the terminal for whichever role we're playing:
+//
+//	menu role: clear, set DECSTBM scroll region below the status pane,
+//	           park cursor in the scroll region, draw an empty status
+//	           frame so the layout is visible immediately.
+//	text role: enter the alternate screen buffer so refresh-style
+//	           redraws don't pollute scrollback, then clear and home.
 func (u *ui) Init() {
 	if u == nil || !u.enabled {
 		return
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.refreshMode {
+		fmt.Print(ansiEnterAlt)
+		fmt.Print(ansiHomeClearDown)
+		return
+	}
 	if u.hasStatusPane {
 		fmt.Print(ansiClearScreen)
 		fmt.Printf("\x1b[%d;%dr", u.statusRows+1, u.rows)
@@ -95,26 +128,36 @@ func (u *ui) Init() {
 		u.drawFrameLocked(emptyFrame(u.cols))
 		return
 	}
-	// Text role: just clear screen and let everything scroll naturally.
 	fmt.Print(ansiClearScreen)
 	fmt.Print("\x1b[1;1H")
 }
 
-// Restore returns the terminal scroll region to its default before exit.
+// Restore undoes Init: leaves the alternate screen / resets the scroll
+// region so the user's terminal is back to its pre-launch state.
 func (u *ui) Restore() {
 	if u == nil || !u.enabled {
 		return
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.refreshMode {
+		fmt.Print(ansiExitAlt)
+		return
+	}
 	if u.hasStatusPane {
 		fmt.Print(ansiResetScroll)
 	}
 }
 
 // PrintTranslation writes a source/translation pair with a subtle divider
-// and indented bodies, locked against status redraws. Used by the text
-// role for streaming narrative content.
+// and indented bodies, locked against status redraws.
+//
+// In refresh mode (text role): keep a rolling buffer of the last N
+// translations, clear the alternate screen, and redraw them all so the
+// player only sees what's recent. No scroll history.
+//
+// Otherwise (menu role's PrintTranslation calls, plus the non-TTY
+// fallback): write the new translation as a stream-append.
 func (u *ui) PrintTranslation(text, out string, stamp string) {
 	if u == nil || !u.enabled {
 		fmt.Printf("\n[%s] %s\n%s\n", stamp, text, out)
@@ -123,11 +166,37 @@ func (u *ui) PrintTranslation(text, out string, stamp string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
+	if u.refreshMode {
+		u.recent = append(u.recent, recentItem{text: text, out: out, stamp: stamp})
+		if len(u.recent) > u.recentMax {
+			u.recent = u.recent[len(u.recent)-u.recentMax:]
+		}
+		u.redrawRecentLocked()
+		return
+	}
+
+	u.writeTranslationLocked(text, out, stamp)
+}
+
+// writeTranslationLocked is the stream-append render — one card with a
+// dim timestamp rule, indented source in dim, blank line, indented
+// translation in normal weight.
+func (u *ui) writeTranslationLocked(text, out, stamp string) {
 	hr := strings.Repeat("─", maxInt(0, u.cols-len(stamp)-6))
 	fmt.Printf("\n%s── %s %s%s\n", ansiDim, stamp, hr, ansiReset)
 	writeIndented(text, ansiDim)
 	fmt.Println()
 	writeIndented(out, "")
+}
+
+// redrawRecentLocked clears the (alt) screen and reprints the rolling
+// buffer top-to-bottom (oldest first → newest at the bottom, closest
+// to the prompt). Must be called with u.mu held.
+func (u *ui) redrawRecentLocked() {
+	fmt.Print(ansiHomeClearDown)
+	for _, item := range u.recent {
+		u.writeTranslationLocked(item.text, item.out, item.stamp)
+	}
 }
 
 // PrintMenu renders a translated menu / inventory popup. It de-emphasises

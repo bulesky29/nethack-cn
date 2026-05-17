@@ -121,7 +121,11 @@ func RunClient(debug bool, role string) error {
 		pendingMu.Unlock()
 
 		dbg.Raw("flush batch: %d msgs, %d bytes", n, len(batch))
-		go translator.translate(ctx, batch, displayNarrative)
+		// MSGs that reached this client have already been server-side
+		// classified — the menu role receives info cards (farlook
+		// detail) and renders them as menu cards; text role keeps the
+		// narrative style.
+		go translator.translate(ctx, batch, popupDisplayKind(role))
 	}
 
 	events := make(chan event, 128)

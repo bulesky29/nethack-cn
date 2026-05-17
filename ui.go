@@ -25,7 +25,7 @@ type ui struct {
 }
 
 const (
-	statusPaneRows = 4 // 2 raw status rows + 1 separator + 1 blank
+	statusPaneRows = 3 // 2 raw status rows + 1 separator
 )
 
 // ANSI control sequences. DECSTBM (`CSI top;bottom r`) sets the scroll

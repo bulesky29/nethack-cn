@@ -77,8 +77,9 @@ type entry struct {
 // heroEntries — the eight things a new player must internalize. Visually
 // emphasized at the top of page 1. Descriptions include the English
 // etymology in parentheses so the single-letter keys are easier to recall.
+// Assumes number_pad mode (see subtitle).
 var heroEntries = []entry{
-	{"s × n", "搜隐藏门 / 陷阱 (search)：原地多按几次，走廊里没事多按"},
+	{"s（或 n10s）", "搜隐藏门 / 陷阱 (search)：走廊里没事多搜几次"},
 	{";", "远观 (farlook)：指地图任意位置查它是什么。走之前先看"},
 	{"#pray", "向神祈祷 (pray)。HP 危急时新角色能保底救一次"},
 	{"i", "查背包 (inventory)"},
@@ -89,11 +90,11 @@ var heroEntries = []entry{
 }
 
 var combatEntries = []entry{
-	{"F + 方向", "强行攻击该方向 (fight)；打隐形怪"},
+	{"F + 方向", "强行攻击 (fight)；打透明 / 隐形怪"},
 	{"t", "投掷物品 (throw)：选物 + 方向"},
 	{"z", "使用法杖 (zap)：选杖 + 方向"},
 	{"Z", "施法 (cast)：咒语在 + 菜单学"},
-	{"^d", "踢 (kick)"},
+	{"k", "踢 (kick)；锁门、踢宠物让位"},
 }
 
 var gearEntries = []entry{
@@ -106,10 +107,12 @@ var gearEntries = []entry{
 
 var exploreEntries = []entry{
 	{"o / c", "开 (open) / 关 (close) 门"},
+	{"l", "翻箱子 / 容器 (loot)"},
+	{"j", "跳跃 (jump)：跨过水沟、骑士可绕怪"},
+	{"h / ?", "屏内帮助菜单 (help)"},
 	{":", "看脚下 (look here)：同 . 但更明确"},
 	{"\\", "已发现物品 / 怪物列表"},
 	{"^x", "查看自己的属性面板 (extended status)"},
-	{"?", "游戏内帮助菜单 (help)"},
 }
 
 var extEntries = []entry{
@@ -117,7 +120,6 @@ var extEntries = []entry{
 	{"#offer", "在祭坛 _ 上献祭怪物尸体"},
 	{"#enhance", "升级武器熟练度（每次 Xp 升级后看一眼）"},
 	{"#chat", "与 NPC 交谈"},
-	{"#loot", "翻开脚下的箱子 / 容器"},
 	{"#dip", "蘸药水 / 水"},
 	{"#force", "用武器砸锁（武器可能损坏）"},
 	{"#invoke", "唤起神器特殊能力"},
@@ -254,8 +256,8 @@ func addTitle(m core.Maroto) {
 			})),
 	)
 	m.AddRow(6,
-		text.NewCol(12, "by nh-helper · 实时翻译助手自带的入门速查", props.Text{
-			Family: fontFamily, Size: 8, Align: align.Center, Color: colMuted, Top: 1.5,
+		text.NewCol(12, "by nh-helper · 假设已开启 number_pad：方向 = 小键盘 1-9；h=help, j=jump, k=kick, l=loot；重复 N 次先按 n", props.Text{
+			Family: fontFamily, Size: 7.5, Align: align.Center, Color: colMuted, Top: 1.5,
 		}),
 	)
 }

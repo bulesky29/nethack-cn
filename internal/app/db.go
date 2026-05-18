@@ -85,6 +85,13 @@ func openStore() (*store, error) {
 		}
 	}
 
+	return openStoreAt(livePath)
+}
+
+// openStoreAt opens the SQLite live DB at a specific path and applies
+// the schema. Skips the dataDir / snapshot-recovery dance — tests use
+// this directly to isolate the store from the filesystem-walking probe.
+func openStoreAt(livePath string) (*store, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", livePath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -304,8 +311,8 @@ func (s *store) CountGlossary() (int, error) {
 
 // Snapshot atomically copies the current database into db/ with a
 // timestamped filename, then prunes the directory to the most recent
-// `keep` snapshots. Uses SQLite's VACUUM INTO for a consistent point-in-
-// time copy (handles WAL correctly, no torn writes). The live DB
+// `keep` snapshots. Uses SQLite's VACUUM INTO for a consistent point-
+// in-time copy (handles WAL correctly, no torn writes). The live DB
 // (db/nh-helper.db) sits alongside the snapshots and is never pruned.
 //
 // Returns the path of the new snapshot.
@@ -318,11 +325,31 @@ func (s *store) Snapshot(keep int) (string, error) {
 		return "", err
 	}
 	snapDir := filepath.Join(dir, dbDirName)
+	return s.snapshotInto(snapDir, keep)
+}
+
+// snapshotInto is the testable core of Snapshot: takes the snapshot
+// directory explicitly so unit tests can drive it without faking
+// dataDir().
+func (s *store) snapshotInto(snapDir string, keep int) (string, error) {
+	if s == nil {
+		return "", nil
+	}
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", snapDir, err)
 	}
 	stamp := time.Now().Format("20060102-150405")
 	path := filepath.Join(snapDir, fmt.Sprintf("nh-helper-%s.db", stamp))
+
+	// Cooperative shutdown of the menu + text clients lands both
+	// Snapshot calls within the same second. The second VACUUM INTO
+	// would fail with "table translations already exists" because the
+	// destination file is non-empty. Detect that case up front and
+	// treat it as a no-op — they share the same source DB, so a single
+	// snapshot already captures the canonical state.
+	if _, statErr := os.Stat(path); statErr == nil {
+		return path, nil
+	}
 
 	// VACUUM INTO doesn't support placeholder binding for the path, so
 	// we sprintf — safe here because `path` is built from a timestamp
@@ -331,6 +358,12 @@ func (s *store) Snapshot(keep int) (string, error) {
 	_, execErr := s.db.Exec(fmt.Sprintf("VACUUM INTO %q", path))
 	s.mu.Unlock()
 	if execErr != nil {
+		// Lost a race with the sibling client between stat and exec —
+		// the file appeared and VACUUM blew up. Same outcome though:
+		// a snapshot for this second exists.
+		if _, statErr := os.Stat(path); statErr == nil {
+			return path, nil
+		}
 		return "", fmt.Errorf("vacuum into %s: %w", path, execErr)
 	}
 
